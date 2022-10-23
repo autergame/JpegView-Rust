@@ -9,4 +9,4 @@ How To Jpeg DCT Quantize And QuadTree Compression Works Using Rust
 * https://github.com/yacinemezaguer/JPEGVis
 * https://github.com/TannerYork/Region-Quadtree
 
-![alt text](JpegView_image.png)
+![alt text](assets/JpegView_image.png)

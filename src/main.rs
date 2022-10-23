@@ -167,7 +167,7 @@ fn main() {
     let mut root_quad_list: Vec<Rc<RefCell<quad_tree::QuadNode>>> = vec![];
 
     if cfg!(debug_assertions) {
-        let path = format!("{}/testpattern.png", working_dir.to_str().unwrap());
+        let path = format!("{}/assets/testpattern.png", working_dir.to_str().unwrap());
 
         let image = image::io::Reader::open(Path::new(&path))
             .expect("Could not open image")
