@@ -1,0 +1,24 @@
+[package]
+name = "jpegview-rust"
+version = "0.1.0"
+authors = ["autergame"]
+
+[dependencies]
+native-dialog = "0.6.3"
+threadpool = "1.8.1"
+image = "0.24.3"
+
+gl = "0.14.0"
+glfw = "0.45.0"
+
+imgui = { git = "https://github.com/autergame/imgui-rs", version = "0.8.1-alpha.0", features = ["docking"] }
+
+fast-generated-dct =  { git = "https://github.com/autergame/Fast-DCT-Generator-Rust", version = "0.1.0" }
+
+[profile.dev.package.fast-generated-dct]
+opt-level = 3
+strip = true
+debug = false
+incremental = false
+overflow-checks = false
+debug-assertions = false

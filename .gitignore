@@ -1,0 +1,9 @@
+cross_compile.sh
+
+target/
+
+Cargo.lock
+
+**/*.rs.bk
+
+.vscode/
