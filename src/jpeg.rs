@@ -1,4 +1,6 @@
-use crate::my_image;
+#![allow(clippy::needless_range_loop)]
+
+use crate::{my_image, Vec2d, Vec3d};
 use std::{
     f32,
     sync::{Arc, Mutex},
@@ -57,55 +59,36 @@ pub struct Jpeg {
     pub block_size: usize,
     pub block_size_index: usize,
 
-    pub quality: u32,
-    pub quality_start: u32,
+    pub quality: f32,
+    pub quality_start: f32,
 
-    pub use_gen_qtable: bool,
     pub use_threads: bool,
     pub use_fast_dct: bool,
+    pub use_gen_qtable: bool,
     pub use_compression_rate: bool,
 }
 
 impl Jpeg {
     pub fn new(
-        my_image: &mut my_image::MyImage,
         block_size: usize,
-        quality: u32,
-        quality_start: u32,
+        quality: f32,
+        quality_start: f32,
         block_size_index: usize,
-        subsampling_index: usize,
         use_gen_qtable: bool,
-        use_ycbcr: bool,
         use_threads: bool,
         use_fast_dct: bool,
         use_compression_rate: bool,
     ) -> Jpeg {
-        my_image.mwidth = round_up_block_size(my_image.width, block_size);
-        my_image.mheight = round_up_block_size(my_image.height, block_size);
-
-        match use_ycbcr {
-            true => {
-                my_image.image_to_ycbcr();
-                my_image.fill_outbound();
-                my_image.subsampling(true, subsampling_index);
-                my_image.ycbcr_to_image();
-            }
-            false => {
-                my_image.image_to_rgb();
-                my_image.fill_outbound();
-                my_image.subsampling(false, subsampling_index);
-                my_image.rgb_to_image();
-            }
-        }
-
         Jpeg {
             block_size,
             block_size_index,
+
             quality,
             quality_start,
-            use_gen_qtable,
+
             use_threads,
             use_fast_dct,
+            use_gen_qtable,
             use_compression_rate,
         }
     }
@@ -118,20 +101,16 @@ impl Jpeg {
     ) {
         self.use_threads = use_threads;
 
-        my_image.mwidth = round_up_block_size(my_image.width, self.block_size);
-        my_image.mheight = round_up_block_size(my_image.height, self.block_size);
+        my_image.round_up_size(self.block_size);
 
-        match use_ycbcr {
-            true => {
-                my_image.image_to_ycbcr();
-                my_image.fill_outbound();
-                my_image.subsampling(true, subsampling_index);
-            }
-            false => {
-                my_image.image_to_rgb();
-                my_image.fill_outbound();
-                my_image.subsampling(false, subsampling_index);
-            }
+        if use_ycbcr {
+            my_image.image_to_ycbcr();
+            my_image.fill_outbound();
+            my_image.sub_sampling(true, subsampling_index);
+        } else {
+            my_image.image_to_rgb();
+            my_image.fill_outbound();
+            my_image.sub_sampling(false, subsampling_index);
         }
 
         let mut q_matrix_luma =
@@ -140,25 +119,22 @@ impl Jpeg {
             generate_q_matrix(&Q_MATRIX_CHROMA_CONST, self.block_size, self.use_gen_qtable);
 
         if !self.use_compression_rate {
-            let factor = match self.use_gen_qtable {
-                true => {
-                    if self.quality >= 50 {
-                        200.0f32 - (self.quality as f32 * 2.0f32)
-                    } else {
-                        5000.0f32 / self.quality as f32
-                    }
-                }
-                false => 25.0f32 * ((101.0f32 - self.quality as f32) * 0.01f32),
+            let factor = if self.quality >= 50.0f32 {
+                200.0f32 - (self.quality * 2.0f32)
+            } else {
+                5000.0f32 / self.quality
             };
+
             apply_q_matrix_factor(&mut q_matrix_luma, self.block_size, factor);
             apply_q_matrix_factor(&mut q_matrix_chroma, self.block_size, factor);
         }
 
         self.encode(my_image, q_matrix_luma, q_matrix_chroma);
 
-        match use_ycbcr {
-            true => my_image.ycbcr_to_image(),
-            false => my_image.rgb_to_image(),
+        if use_ycbcr {
+            my_image.ycbcr_to_image();
+        } else {
+            my_image.rgb_to_image();
         }
     }
     pub fn encode(
@@ -170,105 +146,186 @@ impl Jpeg {
         let mut jpeg_steps = JpegSteps::new(self, my_image.mwidth);
 
         if !self.use_fast_dct {
-            jpeg_steps.dct_table = generate_dct_table(self.block_size);
-            jpeg_steps.alpha_table = generate_alpha_table(self.block_size);
+            jpeg_steps.dct_table = Some(Arc::new(generate_dct_table(self.block_size)));
+            jpeg_steps.alpha_table = Some(Arc::new(generate_alpha_table(self.block_size)));
         }
-        jpeg_steps.zig_zag_table = generate_zig_zag_table(self.block_size);
 
-        if self.use_threads {
-            let result = Arc::new(Mutex::new(vec![
-                vec![
-                    0u8;
-                    my_image.mheight * my_image.mwidth
-                ];
-                3
-            ]));
-            let jpeg_steps = Arc::new(Mutex::new(jpeg_steps));
+        let block_width_count = my_image.mwidth / self.block_size;
+        let block_height_count = my_image.mheight / self.block_size;
+
+        let final_result_block = if self.use_threads {
+            let jpeg_steps = Arc::new(jpeg_steps);
+
+            let mut image_block = Vec::with_capacity(block_width_count * block_height_count);
+
+            for by in 0..block_height_count {
+                for bx in 0..block_width_count {
+                    let mut solo_image_block: Vec2d<f32> =
+                        vec![vec![0.0f32; self.block_size * self.block_size]; 3];
+
+                    for i in 0..3 {
+                        for y in 0..self.block_size {
+                            for x in 0..self.block_size {
+                                let index_image_block = y * self.block_size + x;
+                                let index_image_converted = ((by * self.block_size) + y)
+                                    * my_image.mwidth
+                                    + ((bx * self.block_size) + x);
+
+                                solo_image_block[i][index_image_block] =
+                                    my_image.image_converted[i][index_image_converted] as f32
+                                        - 128.0f32;
+                            }
+                        }
+                    }
+
+                    image_block.push(solo_image_block);
+                }
+            }
+
+            let mut result_block = Vec::with_capacity(block_width_count * block_height_count);
+
+            for _ in 0..(block_width_count * block_height_count) {
+                result_block.push(Arc::new(Mutex::new(vec![
+                    vec![
+                        0u8;
+                        self.block_size
+                            * self.block_size
+                    ];
+                    3
+                ])));
+            }
+
+            let image_block = Arc::new(image_block);
+
             let q_matrix_luma = Arc::new(q_matrix_luma);
             let q_matrix_chroma = Arc::new(q_matrix_chroma);
-            let image_converted = Arc::new(my_image.image_converted.to_vec());
 
             let cpu_threads = thread::available_parallelism().unwrap().get();
             let pool = threadpool::ThreadPool::with_name("worker".to_string(), cpu_threads);
 
-            for by in (0..my_image.mheight).step_by(self.block_size) {
-                for bx in (0..my_image.mwidth).step_by(self.block_size) {
-                    let arc_result = Arc::clone(&result);
+            for by in 0..block_height_count {
+                for bx in 0..block_width_count {
+                    let start_x = bx * self.block_size;
+                    let index = by * block_width_count + bx;
+
                     let arc_jpeg_steps = Arc::clone(&jpeg_steps);
+                    let arc_image_block = Arc::clone(&image_block);
+                    let arc_result_block = Arc::clone(&result_block[index]);
                     let arc_q_matrix_luma = Arc::clone(&q_matrix_luma);
                     let arc_q_matrix_chroma = Arc::clone(&q_matrix_chroma);
-                    let arc_image_converted = Arc::clone(&image_converted);
 
                     pool.execute(move || {
-                        let result = &mut *arc_result.lock().expect("Could not lock result");
-                        let jpeg_steps =
-                            &mut *arc_jpeg_steps.lock().expect("Could not lock jpeg_steps");
-                        let q_matrix_luma = &*arc_q_matrix_luma;
-                        let q_matrix_chroma = &*arc_q_matrix_chroma;
-                        let image_converted = &*arc_image_converted;
-
-                        jpeg_steps.start_x = bx;
-                        jpeg_steps.start_y = by;
-
-                        jpeg_steps.jpeg_steps(&mut result[0], &image_converted[0], q_matrix_luma);
-                        jpeg_steps.jpeg_steps(&mut result[1], &image_converted[1], q_matrix_chroma);
-                        jpeg_steps.jpeg_steps(&mut result[2], &image_converted[2], q_matrix_chroma);
+                        let arc_locked_result_block = &mut arc_result_block.lock().unwrap();
+                        arc_locked_result_block[0] = arc_jpeg_steps.jpeg_steps(
+                            start_x,
+                            &arc_image_block[index][0],
+                            &arc_q_matrix_luma,
+                        );
+                        arc_locked_result_block[1] = arc_jpeg_steps.jpeg_steps(
+                            start_x,
+                            &arc_image_block[index][1],
+                            &arc_q_matrix_chroma,
+                        );
+                        arc_locked_result_block[2] = arc_jpeg_steps.jpeg_steps(
+                            start_x,
+                            &arc_image_block[index][2],
+                            &arc_q_matrix_chroma,
+                        );
                     });
                 }
             }
-
             pool.join();
-            my_image.image_converted = (*result.lock().expect("Could not lock result")).to_vec();
+
+            result_block
+                .iter()
+                .map(|i| i.lock().unwrap().to_vec())
+                .collect()
         } else {
-            let mut result = vec![vec![0u8; my_image.mheight * my_image.mwidth]; 3];
+            let mut image_block: Vec3d<f32> =
+                vec![
+                    vec![vec![0.0f32; self.block_size * self.block_size]; 3];
+                    block_width_count * block_height_count
+                ];
 
-            for by in (0..my_image.mheight).step_by(self.block_size) {
-                for bx in (0..my_image.mwidth).step_by(self.block_size) {
-                    jpeg_steps.start_x = bx;
-                    jpeg_steps.start_y = by;
+            for i in 0..3 {
+                for by in 0..block_height_count {
+                    for bx in 0..block_width_count {
+                        for y in 0..self.block_size {
+                            for x in 0..self.block_size {
+                                let index_image = by * block_width_count + bx;
+                                let index_image_block = y * self.block_size + x;
+                                let index_image_converted = ((by * self.block_size) + y)
+                                    * my_image.mwidth
+                                    + ((bx * self.block_size) + x);
 
-                    jpeg_steps.jpeg_steps(
-                        &mut result[0],
-                        &my_image.image_converted[0],
-                        &q_matrix_luma,
-                    );
-                    jpeg_steps.jpeg_steps(
-                        &mut result[1],
-                        &my_image.image_converted[1],
-                        &q_matrix_chroma,
-                    );
-                    jpeg_steps.jpeg_steps(
-                        &mut result[2],
-                        &my_image.image_converted[2],
-                        &q_matrix_chroma,
-                    );
+                                image_block[index_image][i][index_image_block] =
+                                    my_image.image_converted[i][index_image_converted] as f32
+                                        - 128.0f32;
+                            }
+                        }
+                    }
                 }
             }
 
-            my_image.image_converted = result;
+            let mut result_block: Vec3d<u8> =
+                vec![
+                    vec![vec![0u8; self.block_size * self.block_size]; 3];
+                    block_width_count * block_height_count
+                ];
+
+            for by in 0..block_height_count {
+                for bx in 0..block_width_count {
+                    let index = by * block_width_count + bx;
+
+                    result_block[index][0] =
+                        jpeg_steps.jpeg_steps(bx, &image_block[index][0], &q_matrix_luma);
+                    result_block[index][1] =
+                        jpeg_steps.jpeg_steps(bx, &image_block[index][1], &q_matrix_chroma);
+                    result_block[index][2] =
+                        jpeg_steps.jpeg_steps(bx, &image_block[index][2], &q_matrix_chroma);
+                }
+            }
+
+            result_block
+        };
+
+        let mut result: Vec2d<u8> = vec![vec![0u8; my_image.mheight * my_image.mwidth]; 3];
+
+        for i in 0..3 {
+            for by in 0..block_height_count {
+                for bx in 0..block_width_count {
+                    for y in 0..self.block_size {
+                        for x in 0..self.block_size {
+                            let index_final = by * block_width_count + bx;
+                            let index_result_block = y * self.block_size + x;
+                            let index_result = ((by * self.block_size) + y) * my_image.mwidth
+                                + ((bx * self.block_size) + x);
+
+                            result[i][index_result] =
+                                final_result_block[index_final][i][index_result_block];
+                        }
+                    }
+                }
+            }
         }
+
+        my_image.image_converted = result;
     }
 }
 
+#[derive(Clone)]
 pub struct JpegSteps {
-    pub dct_table: Vec<Vec<f32>>,
-    pub alpha_table: Vec<f32>,
-    pub zig_zag_table: Vec<usize>,
-
-    pub dct_matrix: Vec<f32>,
-    pub image_block: Vec<f32>,
+    pub dct_table: Option<Arc<Vec2d<f32>>>,
+    pub alpha_table: Option<Arc<Vec<f32>>>,
 
     pub mwidth: usize,
 
-    pub start_x: usize,
-    pub start_y: usize,
-
     pub block_size: usize,
-    pub quality_start: u32,
+    pub quality_start: f32,
     pub block_size_index: usize,
 
-    pub use_gen_qtable: bool,
     pub use_fast_dct: bool,
+    pub use_gen_qtable: bool,
     pub use_compression_rate: bool,
 
     pub q_control: f32,
@@ -278,62 +335,29 @@ pub struct JpegSteps {
 impl JpegSteps {
     pub fn new(jpeg: &Jpeg, mwidth: usize) -> JpegSteps {
         JpegSteps {
-            dct_table: vec![],
-            alpha_table: vec![],
-            zig_zag_table: vec![],
-
-            dct_matrix: vec![0.0f32; jpeg.block_size * jpeg.block_size],
-            image_block: vec![0.0f32; jpeg.block_size * jpeg.block_size],
+            dct_table: None,
+            alpha_table: None,
 
             mwidth,
-
-            start_x: 0,
-            start_y: 0,
 
             block_size: jpeg.block_size,
             quality_start: jpeg.quality_start,
             block_size_index: jpeg.block_size_index,
 
-            use_gen_qtable: jpeg.use_gen_qtable,
             use_fast_dct: jpeg.use_fast_dct,
+            use_gen_qtable: jpeg.use_gen_qtable,
             use_compression_rate: jpeg.use_compression_rate,
 
             q_control: 100.0f32 - jpeg.quality_start as f32,
             two_block_size: 2.0f32 / jpeg.block_size as f32,
         }
     }
-    pub fn zig_zag_function(&self) -> Vec<i32> {
-        let mut dct_matrix_zig_zag = vec![0i32; self.block_size * self.block_size];
-        for y in 0..self.block_size {
-            for x in 0..self.block_size {
-                let index = y * self.block_size + x;
-                dct_matrix_zig_zag[self.zig_zag_table[index]] = self.dct_matrix[index] as i32;
-            }
-        }
-        dct_matrix_zig_zag
-    }
-    pub fn un_zig_zag_function(&mut self, dct_matrix_zig_zag: &[i32]) {
-        for y in 0..self.block_size {
-            for x in 0..self.block_size {
-                let index = y * self.block_size + x;
-                self.dct_matrix[index] = dct_matrix_zig_zag[self.zig_zag_table[index]] as f32;
-            }
-        }
-    }
-    pub fn dct_function(&mut self, image_converted: &[u8]) {
-        for y in 0..self.block_size {
-            for x in 0..self.block_size {
-                let index_image = y * self.block_size + x;
-                let index_image_converted = (self.start_y + y) * self.mwidth + (self.start_x + x);
-                self.image_block[index_image] =
-                    image_converted[index_image_converted] as f32 - 128.0f32;
-            }
-        }
-        match self.use_fast_dct {
-            true => {
-                FUNCTIONS_FAST_DCT[self.block_size_index](&self.image_block, &mut self.dct_matrix)
-            }
-            false => {
+    pub fn dct_function(&self, image_block: &[f32]) -> Vec<f32> {
+        let mut dct_matrix: Vec<f32> = vec![0.0f32; self.block_size * self.block_size];
+        if self.use_fast_dct {
+            FUNCTIONS_FAST_DCT[self.block_size_index](image_block, &mut dct_matrix);
+        } else if let Some(dct_table) = &self.dct_table {
+            if let Some(alpha_table) = &self.alpha_table {
                 for v in 0..self.block_size {
                     let vblock = v * self.block_size;
 
@@ -342,30 +366,31 @@ impl JpegSteps {
 
                         let mut sum = 0.0f32;
                         for y in 0..self.block_size {
-                            let yv = self.dct_table[0][vblock + y];
+                            let yv = dct_table[0][vblock + y];
 
                             for x in 0..self.block_size {
-                                let xu = self.dct_table[0][ublock + x];
+                                let xu = dct_table[0][ublock + x];
 
                                 let index_image = y * self.block_size + x;
-                                sum += self.image_block[index_image] * xu * yv;
+                                sum += image_block[index_image] * xu * yv;
                             }
                         }
 
                         let index_matrix = vblock + u;
-                        self.dct_matrix[index_matrix] =
-                            self.alpha_table[index_matrix] * sum * self.two_block_size;
+                        dct_matrix[index_matrix] =
+                            alpha_table[index_matrix] * sum * self.two_block_size;
                     }
                 }
             }
         }
+        dct_matrix
     }
-    pub fn inverse_dct_function(&mut self, result: &mut [u8]) {
-        match self.use_fast_dct {
-            true => {
-                FUNCTIONS_FAST_IDCT[self.block_size_index](&self.dct_matrix, &mut self.image_block)
-            }
-            false => {
+    pub fn inverse_dct_function(&self, dct_matrix: &[f32]) -> Vec<u8> {
+        let mut image_block: Vec<f32> = vec![0.0f32; self.block_size * self.block_size];
+        if self.use_fast_dct {
+            FUNCTIONS_FAST_IDCT[self.block_size_index](dct_matrix, &mut image_block);
+        } else if let Some(dct_table) = &self.dct_table {
+            if let Some(alpha_table) = &self.alpha_table {
                 for y in 0..self.block_size {
                     let yblock = y * self.block_size;
 
@@ -376,79 +401,112 @@ impl JpegSteps {
                         for v in 0..self.block_size {
                             let vblock = v * self.block_size;
 
-                            let yv = self.dct_table[1][yblock + v];
+                            let yv = dct_table[1][yblock + v];
 
                             for u in 0..self.block_size {
-                                let xu = self.dct_table[1][xblock + u];
+                                let xu = dct_table[1][xblock + u];
 
                                 let index_matrix = vblock + u;
-                                sum += self.alpha_table[index_matrix]
-                                    * self.dct_matrix[index_matrix]
-                                    * xu
-                                    * yv;
+                                sum +=
+                                    alpha_table[index_matrix] * dct_matrix[index_matrix] * xu * yv;
                             }
                         }
 
                         let index_image = y * self.block_size + x;
-                        self.image_block[index_image] = sum * self.two_block_size;
+                        image_block[index_image] = sum * self.two_block_size;
                     }
                 }
             }
         }
-        for y in 0..self.block_size {
-            for x in 0..self.block_size {
-                let index_image = y * self.block_size + x;
-                let index_result = (self.start_y + y) * self.mwidth + (self.start_x + x);
-                result[index_result] =
-                    my_image::min_max_color(self.image_block[index_image] as f32 + 128.0f32);
-            }
-        }
-    }
-    fn quantize_value(&mut self, x: usize, index: usize, q_matrix: &[f32]) -> f32 {
-        match self.use_compression_rate {
-            true => {
-                let mut factor = self.quality_start as f32
-                    + ((self.start_x + x) as f32 / self.mwidth as f32) * self.q_control;
-
-                factor = match self.use_gen_qtable {
-                    true => {
-                        if factor >= 50.0f32 {
-                            200.0f32 - factor * 2.0f32
-                        } else {
-                            5000.0f32 / factor
-                        }
-                    }
-                    false => 25.0f32 * ((101.0f32 - factor) * 0.01f32),
-                };
-
-                1.0f32 + (q_matrix[index] - 1.0f32) * factor
-            }
-            false => q_matrix[index],
-        }
-    }
-    pub fn quantize_function(&mut self, q_matrix: &[f32]) {
+        let mut result_block: Vec<u8> = vec![0u8; self.block_size * self.block_size];
         for y in 0..self.block_size {
             for x in 0..self.block_size {
                 let index = y * self.block_size + x;
-                let q_matrix_value = self.quantize_value(x, index, q_matrix);
-                self.dct_matrix[index] = (self.dct_matrix[index] / q_matrix_value).round();
+                result_block[index] = my_image::min_max_color(image_block[index] + 128.0f32);
             }
         }
+        result_block
     }
-    pub fn de_quantize_function(&mut self, q_matrix: &[f32]) {
+    fn quantize_value(
+        &self,
+        x: f32,
+        index: usize,
+        q_matrix: &[f32],
+        use_compression_rate: bool,
+    ) -> f32 {
+        if use_compression_rate {
+            let mut factor = self.quality_start + (x / self.mwidth as f32) * self.q_control;
+
+            factor = if factor >= 50.0f32 {
+                200.0f32 - factor * 2.0f32
+            } else {
+                5000.0f32 / factor
+            };
+
+            let mut q_value = (q_matrix[index] * factor) / 4.0f32;
+            if q_value <= 0.0f32 {
+                q_value = 1.0f32;
+            }
+            q_value
+        } else {
+            q_matrix[index]
+        }
+    }
+    pub fn quantize_function(
+        &self,
+        start_x: usize,
+        q_matrix: &[f32],
+        dct_matrix: &mut [f32],
+        use_compression_rate: bool,
+    ) {
         for y in 0..self.block_size {
             for x in 0..self.block_size {
                 let index = y * self.block_size + x;
-                let q_matrix_value = self.quantize_value(x, index, q_matrix);
-                self.dct_matrix[index] = self.dct_matrix[index] * q_matrix_value;
+                let q_matrix_value = self.quantize_value(
+                    (start_x + x) as f32,
+                    index,
+                    q_matrix,
+                    use_compression_rate,
+                );
+                dct_matrix[index] = (dct_matrix[index] / q_matrix_value).round();
             }
         }
     }
-    pub fn jpeg_steps(&mut self, result: &mut [u8], image_converted: &[u8], q_matrix: &[f32]) {
-        self.dct_function(image_converted);
-        self.quantize_function(q_matrix);
-        self.de_quantize_function(q_matrix);
-        self.inverse_dct_function(result);
+    pub fn de_quantize_function(
+        &self,
+        start_x: usize,
+        q_matrix: &[f32],
+        dct_matrix: &mut [f32],
+        use_compression_rate: bool,
+    ) {
+        for y in 0..self.block_size {
+            for x in 0..self.block_size {
+                let index = y * self.block_size + x;
+                let q_matrix_value = self.quantize_value(
+                    (start_x + x) as f32,
+                    index,
+                    q_matrix,
+                    use_compression_rate,
+                );
+                dct_matrix[index] *= q_matrix_value;
+            }
+        }
+    }
+    pub fn jpeg_steps(&self, start_x: usize, image_block: &[f32], q_matrix: &[f32]) -> Vec<u8> {
+        let mut dct_matrix = self.dct_function(image_block);
+        self.quantize_function(
+            start_x,
+            q_matrix,
+            &mut dct_matrix,
+            self.use_compression_rate,
+        );
+        self.de_quantize_function(
+            start_x,
+            q_matrix,
+            &mut dct_matrix,
+            self.use_compression_rate,
+        );
+        self.inverse_dct_function(&dct_matrix)
     }
 }
 
@@ -457,20 +515,17 @@ pub fn generate_q_matrix(
     block_size: usize,
     use_gen_qtable: bool,
 ) -> Vec<f32> {
-    let mut q_matrix = vec![0.0f32; block_size * block_size];
-    match use_gen_qtable {
-        true => {
-            for y in 0..block_size {
-                for x in 0..block_size {
-                    q_matrix[y * block_size + x] = (x + y + 1) as f32;
-                }
+    let mut q_matrix: Vec<f32> = vec![0.0f32; block_size * block_size];
+    if use_gen_qtable {
+        for y in 0..block_size {
+            for x in 0..block_size {
+                q_matrix[y * block_size + x] = (x + y + 1) as f32;
             }
         }
-        false => {
-            for y in 0..block_size {
-                for x in 0..block_size {
-                    q_matrix[y * block_size + x] = q_matrix_base[(y % 8) * 8 + (x % 8)];
-                }
+    } else {
+        for y in 0..block_size {
+            for x in 0..block_size {
+                q_matrix[y * block_size + x] = q_matrix_base[(y % 8) * 8 + (x % 8)];
             }
         }
     }
@@ -480,14 +535,18 @@ pub fn generate_q_matrix(
 pub fn apply_q_matrix_factor(q_matrix: &mut [f32], block_size: usize, factor: f32) {
     for y in 0..block_size {
         for x in 0..block_size {
-            q_matrix[y * block_size + x] =
-                1.0f32 + (q_matrix[y * block_size + x] - 1.0f32) * factor;
+            let index = y * block_size + x;
+            let mut q_value = ((q_matrix[index] * factor) + 50.0f32) / 100.0f32;
+            if q_value <= 0.0f32 {
+                q_value = 1.0f32;
+            }
+            q_matrix[index] = q_value;
         }
     }
 }
 
-pub fn generate_dct_table(block_size: usize) -> Vec<Vec<f32>> {
-    let mut dct_table = vec![vec![0.0f32; block_size * block_size]; 2];
+pub fn generate_dct_table(block_size: usize) -> Vec2d<f32> {
+    let mut dct_table: Vec2d<f32> = vec![vec![0.0f32; block_size * block_size]; 2];
     for y in 0..block_size {
         for x in 0..block_size {
             let cos_calc =
@@ -500,7 +559,7 @@ pub fn generate_dct_table(block_size: usize) -> Vec<Vec<f32>> {
 }
 
 pub fn generate_alpha_table(block_size: usize) -> Vec<f32> {
-    let mut alpha_table = vec![0.0f32; block_size * block_size];
+    let mut alpha_table: Vec<f32> = vec![0.0f32; block_size * block_size];
     for y in 0..block_size {
         for x in 0..block_size {
             alpha_table[y * block_size + x] = if y == 0 {
@@ -515,34 +574,4 @@ pub fn generate_alpha_table(block_size: usize) -> Vec<f32> {
         }
     }
     alpha_table
-}
-
-pub fn generate_zig_zag_table(block_size: usize) -> Vec<usize> {
-    let mut zig_zag_table = vec![0usize; block_size * block_size];
-    let mut n = 0;
-    let mut j: usize;
-    let mut index: usize;
-    for i in 0..(block_size * 2) {
-        if i < block_size {
-            j = 0;
-        } else {
-            j = i - block_size + 1;
-        }
-        while j <= i && j < block_size {
-            if (i & 1) == 1 {
-                index = j * (block_size - 1) + i;
-            } else {
-                index = (i - j) * block_size + j;
-            }
-            zig_zag_table[index] = n;
-            n += 1;
-            j += 1;
-        }
-    }
-    zig_zag_table
-}
-
-pub fn round_up_block_size(x: usize, block_size: usize) -> usize {
-    let y = x + (block_size - 1);
-    y - (y % block_size)
 }

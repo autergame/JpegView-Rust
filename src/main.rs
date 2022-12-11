@@ -1,5 +1,9 @@
+extern crate bincode;
 extern crate image;
+extern crate miniz_oxide;
 extern crate native_dialog;
+extern crate serde;
+extern crate sha2;
 extern crate threadpool;
 
 extern crate gl;
@@ -9,7 +13,7 @@ extern crate imgui;
 
 extern crate fast_generated_dct;
 
-use std::{cell::RefCell, env, path::Path, rc::Rc, thread};
+use std::{env, path::Path, thread};
 
 use gl::types::GLuint;
 use glfw::{Action, Context, Key};
@@ -23,6 +27,9 @@ mod quad_mind;
 mod quad_tree;
 
 fn main() {
+    let cargo_pkg_version = env!("CARGO_PKG_VERSION");
+    let working_dir = env::current_dir().expect("Could not get current dir");
+
     let mut glfw = glfw::init(glfw::FAIL_ON_ERRORS).expect("Could not init GLFW");
 
     glfw.window_hint(glfw::WindowHint::Samples(None));
@@ -40,7 +47,7 @@ fn main() {
         .create_window(
             window_width as u32,
             window_height as u32,
-            format!("JpegView-Rust v{}", env!("CARGO_PKG_VERSION")).as_str(),
+            format!("JpegView-Rust v{}", cargo_pkg_version).as_str(),
             glfw::WindowMode::Windowed,
         )
         .expect("Could not create GLFW window");
@@ -111,14 +118,9 @@ fn main() {
     let mut last_time = 0.0f32;
     let mut last_time_fps = 0.0f32;
 
-    let working_dir = env::current_dir().expect("Could not get current dir");
-
     let threads_available = match thread::available_parallelism() {
         Ok(ok) => ok.get() > 1,
-        Err(error) => {
-            println!("{}", error);
-            false
-        }
+        Err(_) => false,
     };
     let mut use_threads = threads_available;
 
@@ -131,16 +133,12 @@ fn main() {
     let mut use_jpeg = true;
     let mut use_quad_tree = false;
 
-    let mut use_draw_line = true;
-    let mut use_quad_tree_pow_2 = false;
-    let mut min_size = 8usize;
-    let mut min_size_index = 2usize;
-    let mut max_size = 32usize;
-    let mut max_size_index = 4usize;
-    let mut max_depth = 50u32;
-    let mut max_depth_max = 100u32;
-    let mut threshold_error = 5.0f32;
+    let mut max_depth_max = 100;
+    let mut min_size_index = 2;
+    let mut max_size_index = 4;
     let mut threshold_error_max = 100.0f32;
+
+    let mut quad_tree = quad_tree::QuadTree::new(50, 8, 32, false, true, 5.0f32);
 
     let mut use_ycbcr = true;
     let mut subsampling_index = 0usize;
@@ -164,10 +162,11 @@ fn main() {
     let mut opt_my_image: Option<my_image::MyImage> = None;
     let mut opt_open_file: Option<String> = None;
 
-    let mut root_quad_list: Vec<Rc<RefCell<quad_tree::QuadNode>>> = vec![];
+    let mut quad_mind_list: Vec<quad_tree::QuadNodeRef> = Vec::new();
+    let mut quad_mind_dct_zig_zag: Vec3d<i32> = Vec::new();
 
     if cfg!(debug_assertions) {
-        let path = format!("{}/assets/testpattern.png", working_dir.to_str().unwrap());
+        let path = format!("{}/assets/test_pattern.png", working_dir.to_str().unwrap());
 
         let image = image::io::Reader::open(Path::new(&path))
             .expect("Could not open image")
@@ -183,19 +182,19 @@ fn main() {
             image_height as usize,
         );
 
-        let jpeg = jpeg::Jpeg::new(
-            &mut my_image,
-            8,
-            90,
-            1,
-            2,
-            subsampling_index,
-            false,
-            use_ycbcr,
-            use_threads,
-            true,
-            false,
-        );
+        if use_ycbcr {
+            my_image.image_to_ycbcr();
+            my_image.fill_outbound();
+            my_image.sub_sampling(true, subsampling_index);
+            my_image.ycbcr_to_image();
+        } else {
+            my_image.image_to_rgb();
+            my_image.fill_outbound();
+            my_image.sub_sampling(false, subsampling_index);
+            my_image.rgb_to_image();
+        }
+
+        let jpeg = jpeg::Jpeg::new(8, 90.0f32, 1.0f32, 2, false, use_threads, true, false);
 
         image_texture_original = my_image.create_opengl_image(false, true);
         image_texture_original_zoom = my_image.create_opengl_image(false, false);
@@ -216,7 +215,7 @@ fn main() {
             window.set_title(
                 format!(
                     "JpegView-Rust v{} - Fps: {:1.0} / Ms: {:1.3}",
-                    env!("CARGO_PKG_VERSION"),
+                    cargo_pkg_version,
                     frames / delta_time_fps,
                     1000.0f32 / frames
                 )
@@ -277,93 +276,160 @@ fn main() {
                             .add_filter("QUADMIND Image", &["qmi"])
                             .show_open_single_file()
                             .expect("Could not open file dialog");
+
                         if let Some(path) = file_dialog_path {
-                            let image = image::io::Reader::open(&path)
-                                .expect("Could not open image")
-                                .decode()
-                                .expect("Could not decode image");
+                            if let Some(ext) = path.extension() {
+                                match ext.to_str().unwrap() {
+                                    "jpg" | "jpeg" | "png" | "bmp" => {
+                                        let image = image::io::Reader::open(&path)
+                                            .expect("Could not open image")
+                                            .decode()
+                                            .expect("Could not decode image");
 
-                            let image_width = image.width() as i32;
-                            let image_height = image.height() as i32;
+                                        let image_width = image.width() as i32;
+                                        let image_height = image.height() as i32;
 
-                            let mut my_image = my_image::MyImage::new(
-                                image.into_rgb8().into_vec(),
-                                image_width as usize,
-                                image_height as usize,
-                            );
+                                        let mut my_image = my_image::MyImage::new(
+                                            image.into_rgb8().into_vec(),
+                                            image_width as usize,
+                                            image_height as usize,
+                                        );
 
-                            let jpeg = match &opt_jpeg {
-                                Some(jpeg) => {
-                                    unsafe {
-                                        gl::DeleteTextures(1, &image_texture_original);
-                                        gl::DeleteTextures(1, &image_texture_original_zoom);
-                                        gl::DeleteTextures(1, &image_texture_final);
-                                        gl::DeleteTextures(1, &image_texture_final_zoom);
+                                        if use_ycbcr {
+                                            my_image.image_to_ycbcr();
+                                            my_image.fill_outbound();
+                                            my_image.sub_sampling(true, subsampling_index);
+                                            my_image.ycbcr_to_image();
+                                        } else {
+                                            my_image.image_to_rgb();
+                                            my_image.fill_outbound();
+                                            my_image.sub_sampling(false, subsampling_index);
+                                            my_image.rgb_to_image();
+                                        }
+
+                                        let jpeg = match &opt_jpeg {
+                                            Some(jpeg) => {
+                                                unsafe {
+                                                    gl::DeleteTextures(1, &image_texture_original);
+                                                    gl::DeleteTextures(
+                                                        1,
+                                                        &image_texture_original_zoom,
+                                                    );
+                                                    gl::DeleteTextures(1, &image_texture_final);
+                                                    gl::DeleteTextures(
+                                                        1,
+                                                        &image_texture_final_zoom,
+                                                    );
+                                                }
+                                                jpeg::Jpeg::new(
+                                                    jpeg.block_size,
+                                                    jpeg.quality,
+                                                    jpeg.quality_start,
+                                                    jpeg.block_size_index,
+                                                    jpeg.use_gen_qtable,
+                                                    use_threads,
+                                                    jpeg.use_fast_dct,
+                                                    jpeg.use_compression_rate,
+                                                )
+                                            }
+                                            None => jpeg::Jpeg::new(
+                                                8,
+                                                90.0f32,
+                                                1.0f32,
+                                                2,
+                                                false,
+                                                use_threads,
+                                                true,
+                                                false,
+                                            ),
+                                        };
+
+                                        image_texture_original =
+                                            my_image.create_opengl_image(false, true);
+                                        image_texture_original_zoom =
+                                            my_image.create_opengl_image(false, false);
+                                        image_texture_final =
+                                            my_image.create_opengl_image(true, true);
+                                        image_texture_final_zoom =
+                                            my_image.create_opengl_image(true, false);
+
+                                        opt_jpeg = Some(jpeg);
+                                        opt_my_image = Some(my_image);
+                                        opt_open_file = Some(path.to_str().unwrap().to_string());
                                     }
-                                    jpeg::Jpeg::new(
-                                        &mut my_image,
-                                        jpeg.block_size,
-                                        jpeg.quality,
-                                        jpeg.quality_start,
-                                        jpeg.block_size_index,
-                                        subsampling_index,
-                                        jpeg.use_gen_qtable,
-                                        use_ycbcr,
-                                        use_threads,
-                                        jpeg.use_fast_dct,
-                                        jpeg.use_compression_rate,
-                                    )
+                                    "qmi" => {
+                                        let (my_image, jpeg) = quad_mind::load_quad_mind(&path)
+                                            .expect("Could not load quad mind image");
+
+                                        if opt_jpeg.is_some() {
+                                            unsafe {
+                                                gl::DeleteTextures(1, &image_texture_original);
+                                                gl::DeleteTextures(1, &image_texture_original_zoom);
+                                                gl::DeleteTextures(1, &image_texture_final);
+                                                gl::DeleteTextures(1, &image_texture_final_zoom);
+                                            }
+                                        }
+
+                                        image_texture_original =
+                                            my_image.create_opengl_image(false, true);
+                                        image_texture_original_zoom =
+                                            my_image.create_opengl_image(false, false);
+                                        image_texture_final =
+                                            my_image.create_opengl_image(true, true);
+                                        image_texture_final_zoom =
+                                            my_image.create_opengl_image(true, false);
+
+                                        opt_jpeg = Some(jpeg);
+                                        opt_my_image = Some(my_image);
+                                        opt_open_file = Some(path.to_str().unwrap().to_string());
+                                    }
+                                    _ => {}
                                 }
-                                None => jpeg::Jpeg::new(
-                                    &mut my_image,
-                                    8,
-                                    90,
-                                    1,
-                                    2,
-                                    subsampling_index,
-                                    false,
-                                    use_ycbcr,
-                                    use_threads,
-                                    true,
-                                    false,
-                                ),
-                            };
-
-                            image_texture_original = my_image.create_opengl_image(false, true);
-                            image_texture_original_zoom =
-                                my_image.create_opengl_image(false, false);
-                            image_texture_final = my_image.create_opengl_image(true, true);
-                            image_texture_final_zoom = my_image.create_opengl_image(true, false);
-
-                            opt_jpeg = Some(jpeg);
-                            opt_my_image = Some(my_image);
-                            opt_open_file = Some(path.to_str().unwrap().to_string());
+                            }
                         }
                     }
                     if opt_open_file.is_some() {
                         if let Some(my_image) = &mut opt_my_image {
-                            if ui.menu_item("Save image") {
-                                let file_dialog_path = FileDialog::new()
-                                    .set_location(&working_dir)
-                                    .add_filter("PNG Image", &["png"])
-                                    .add_filter("QUADMIND Image", &["qmi"])
-                                    .show_save_single_file()
-                                    .expect("Could not open save file dialog");
-                                if let Some(path) = file_dialog_path {
-                                    match path.extension() {
-                                        Some(ext) => match ext.to_str().unwrap() {
-                                            "png" => image::save_buffer(
-                                                path,
-                                                &my_image.final_image,
-                                                my_image.width as u32,
-                                                my_image.height as u32,
-                                                image::ColorType::Rgb8,
-                                            )
-                                            .expect("Could not save image"),
-                                            "qmi" => {}
-                                            _ => {}
-                                        },
-                                        None => {}
+                            if let Some(jpeg) = &mut opt_jpeg {
+                                if ui.menu_item("Save image") {
+                                    let file_dialog_path = FileDialog::new()
+                                        .set_location(&working_dir)
+                                        .add_filter("PNG Image", &["png"])
+                                        .add_filter("QUADMIND Image", &["qmi"])
+                                        .show_save_single_file()
+                                        .expect("Could not open save file dialog");
+
+                                    if let Some(path) = file_dialog_path {
+                                        if let Some(ext) = path.extension() {
+                                            match ext.to_str().unwrap() {
+                                                "png" => {
+                                                    if use_jpeg {
+                                                        image::save_buffer(
+                                                            path,
+                                                            &my_image.final_image,
+                                                            my_image.width as u32,
+                                                            my_image.height as u32,
+                                                            image::ColorType::Rgb8,
+                                                        )
+                                                        .expect("Could not save image")
+                                                    }
+                                                }
+                                                "qmi" => {
+                                                    if use_quad_tree && use_jpeg {
+                                                        quad_mind::save_quad_mind(
+                                                            &path,
+                                                            &quad_mind_list,
+                                                            &quad_mind_dct_zig_zag,
+                                                            my_image,
+                                                            jpeg,
+                                                            use_ycbcr,
+                                                            use_threads,
+                                                        )
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -371,9 +437,10 @@ fn main() {
                     }
                     ui.same_line();
                     if ui.checkbox("Enable Vsync", &mut use_vsync) {
-                        glfw.set_swap_interval(match use_vsync {
-                            true => glfw::SwapInterval::Sync(1),
-                            false => glfw::SwapInterval::None,
+                        glfw.set_swap_interval(if use_vsync {
+                            glfw::SwapInterval::Sync(1)
+                        } else {
+                            glfw::SwapInterval::None
                         });
                     }
                 });
@@ -407,7 +474,7 @@ fn main() {
                             ui.bullet_text("Quality Factor:");
                             ui.same_line();
                             ui.set_next_item_width(first_column - ui.cursor_pos()[0]);
-                            ui.slider("##quality", 1, 100, &mut jpeg.quality);
+                            ui.slider("##quality", 1.0f32, 100.0f32, &mut jpeg.quality);
                             ui.align_text_to_frame_padding();
                             ui.bullet_text("Block Size:");
                             ui.same_line();
@@ -430,7 +497,7 @@ fn main() {
                             ui.bullet_text("Quality Start:");
                             ui.same_line();
                             ui.set_next_item_width(first_column - ui.cursor_pos()[0]);
-                            ui.slider("##quality_start", 1, 100, &mut jpeg.quality_start);
+                            ui.slider("##quality_start", 1.0f32, 100.0f32, &mut jpeg.quality_start);
                             ui.unindent();
                             ui.align_text_to_frame_padding();
                             ui.checkbox("Use Fast DCT Algorithm", &mut jpeg.use_fast_dct);
@@ -460,10 +527,10 @@ fn main() {
                             ui.bullet_text("Max Depth:");
                             ui.same_line();
                             ui.set_next_item_width(second_column - ui.cursor_pos()[0]);
-                            ui.slider("##max_depth", 1, max_depth_max, &mut max_depth);
-                            if max_depth >= max_depth_max {
+                            ui.slider("##max_depth", 1, max_depth_max, &mut quad_tree.max_depth);
+                            if quad_tree.max_depth >= max_depth_max {
                                 max_depth_max += 10;
-                                max_depth -= 1;
+                                quad_tree.max_depth -= 1;
                             }
                             ui.align_text_to_frame_padding();
                             ui.bullet_text("Error Threshold:");
@@ -473,11 +540,11 @@ fn main() {
                                 "##threshold_error",
                                 0.0f32,
                                 threshold_error_max,
-                                &mut threshold_error,
+                                &mut quad_tree.threshold_error,
                             );
-                            if threshold_error >= threshold_error_max {
+                            if quad_tree.threshold_error >= threshold_error_max {
                                 threshold_error_max += 10.0f32;
-                                threshold_error -= 1.0f32;
+                                quad_tree.threshold_error -= 1.0f32;
                             }
                             ui.align_text_to_frame_padding();
                             ui.bullet_text("Min Quad Size:");
@@ -488,7 +555,7 @@ fn main() {
                                 &mut min_size_index,
                                 &block_size_items,
                             ) {
-                                min_size = 1 << (min_size_index + 1);
+                                quad_tree.min_size = 1 << (min_size_index + 1);
                             }
                             ui.align_text_to_frame_padding();
                             ui.bullet_text("Max Quad Size:");
@@ -499,12 +566,12 @@ fn main() {
                                 &mut max_size_index,
                                 &block_size_items,
                             ) {
-                                max_size = 1 << (max_size_index + 1);
+                                quad_tree.max_size = 1 << (max_size_index + 1);
                             }
                             ui.align_text_to_frame_padding();
-                            ui.checkbox("Use Quad Size Power Of 2", &mut use_quad_tree_pow_2);
+                            ui.checkbox("Use Quad Size Power Of 2", &mut quad_tree.use_pow_2);
                             ui.align_text_to_frame_padding();
-                            ui.checkbox("Draw Quadrant Line", &mut use_draw_line);
+                            ui.checkbox("Draw Quadrant Line", &mut quad_tree.use_draw_line);
                             ui.unindent();
                             separator();
                             ui.align_text_to_frame_padding();
@@ -541,44 +608,33 @@ fn main() {
                                 [ui.content_region_avail()[0], 0.0f32],
                             ) {
                                 if use_quad_tree && use_jpeg {
-                                    root_quad_list = quad_mind::render_quad_mind(
-                                        jpeg,
-                                        my_image,
-                                        min_size,
-                                        max_size,
-                                        max_depth,
-                                        use_draw_line,
-                                        threshold_error,
-                                        use_ycbcr,
-                                        use_threads,
-                                        subsampling_index,
-                                    );
+                                    (quad_mind_list, quad_mind_dct_zig_zag) =
+                                        quad_mind::render_quad_mind(
+                                            jpeg,
+                                            my_image,
+                                            &quad_tree,
+                                            use_ycbcr,
+                                            use_threads,
+                                            subsampling_index,
+                                        );
                                 } else if !use_quad_tree && !use_jpeg {
-                                    match use_ycbcr {
-                                        true => {
-                                            my_image.image_to_ycbcr();
-                                            my_image.fill_outbound();
-                                            my_image.subsampling(true, subsampling_index);
-                                            my_image.ycbcr_to_image();
-                                        }
-                                        false => {
-                                            my_image.image_to_rgb();
-                                            my_image.fill_outbound();
-                                            my_image.subsampling(false, subsampling_index);
-                                            my_image.rgb_to_image();
-                                        }
+                                    if use_ycbcr {
+                                        my_image.image_to_ycbcr();
+                                        my_image.fill_outbound();
+                                        my_image.sub_sampling(true, subsampling_index);
+                                        my_image.ycbcr_to_image();
+                                    } else {
+                                        my_image.image_to_rgb();
+                                        my_image.fill_outbound();
+                                        my_image.sub_sampling(false, subsampling_index);
+                                        my_image.rgb_to_image();
                                     }
                                 } else if use_quad_tree {
-                                    root_quad_list = quad_tree::render_quad_tree(
+                                    quad_tree::render_quad_tree(
+                                        &quad_tree,
                                         my_image,
                                         use_ycbcr,
-                                        min_size,
-                                        max_size,
-                                        max_depth,
-                                        use_draw_line,
-                                        threshold_error,
                                         subsampling_index,
-                                        use_quad_tree_pow_2,
                                     );
                                 } else if use_jpeg {
                                     jpeg.render_jpeg(
@@ -759,3 +815,6 @@ fn separator() {
         )
     }
 }
+
+pub type Vec2d<T> = Vec<Vec<T>>;
+pub type Vec3d<T> = Vec<Vec<Vec<T>>>;

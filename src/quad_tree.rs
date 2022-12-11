@@ -1,4 +1,6 @@
-use crate::my_image;
+#![allow(clippy::needless_range_loop)]
+
+use crate::{my_image, Vec2d};
 use std::{cell::RefCell, rc::Rc};
 
 fn weighted_average(histogram: &Vec<i32>) -> (u8, f32) {
@@ -24,7 +26,7 @@ fn weighted_average(histogram: &Vec<i32>) -> (u8, f32) {
     (value as u8, error)
 }
 
-fn color_from_histogram(histogram: &[Vec<i32>]) -> (f32, [u8; 3]) {
+fn color_from_histogram(histogram: &Vec2d<i32>) -> (f32, [u8; 3]) {
     let (r, r_error) = weighted_average(&histogram[0]);
     let (g, g_error) = weighted_average(&histogram[1]);
     let (b, b_error) = weighted_average(&histogram[2]);
@@ -32,67 +34,108 @@ fn color_from_histogram(histogram: &[Vec<i32>]) -> (f32, [u8; 3]) {
     (error_calc, [r, g, b])
 }
 
-pub struct QuadNode {
-    pub image: Rc<Vec<u8>>,
+pub struct QuadTree {
+    pub max_depth: u32,
 
+    pub min_size: usize,
+    pub max_size: usize,
+
+    pub use_pow_2: bool,
+    pub use_draw_line: bool,
+
+    pub threshold_error: f32,
+}
+
+impl QuadTree {
+    pub fn new(
+        max_depth: u32,
+        min_size: usize,
+        max_size: usize,
+        use_pow_2: bool,
+        use_draw_line: bool,
+        threshold_error: f32,
+    ) -> QuadTree {
+        QuadTree {
+            max_depth,
+
+            min_size,
+            max_size,
+
+            use_pow_2,
+            use_draw_line,
+
+            threshold_error,
+        }
+    }
+}
+
+pub type QuadNodeRef = Rc<RefCell<QuadNode>>;
+
+pub struct QuadNode {
     pub rgb: [u8; 3],
     pub error: f32,
     pub depth: u32,
-    pub boxl: usize,
-    pub boxt: usize,
-    pub boxr: usize,
-    pub boxb: usize,
+
+    pub box_top: usize,
+    pub box_left: usize,
+    pub box_right: usize,
+    pub box_bottom: usize,
 
     pub width_block_size: usize,
     pub height_block_size: usize,
 
-    pub children_tl: Option<Rc<RefCell<QuadNode>>>,
-    pub children_tr: Option<Rc<RefCell<QuadNode>>>,
-    pub children_bl: Option<Rc<RefCell<QuadNode>>>,
-    pub children_br: Option<Rc<RefCell<QuadNode>>>,
+    pub children_tl: Option<QuadNodeRef>,
+    pub children_tr: Option<QuadNodeRef>,
+    pub children_bl: Option<QuadNodeRef>,
+    pub children_br: Option<QuadNodeRef>,
 }
 
 impl QuadNode {
     pub fn new(
-        image: Rc<Vec<u8>>,
-        width: usize,
-        height: usize,
-        boxl: usize,
-        boxt: usize,
-        boxr: usize,
-        boxb: usize,
+        my_image: &my_image::MyImage,
+        box_left: usize,
+        box_top: usize,
+        box_right: usize,
+        box_bottom: usize,
         depth: u32,
-    ) -> Option<Rc<RefCell<QuadNode>>> {
-        if boxl < width && boxt < height {
-            let boxr_limited = if boxr >= width { width - 1 } else { boxr };
-            let boxb_limited = if boxb >= height { height - 1 } else { boxb };
+    ) -> Option<QuadNodeRef> {
+        if box_left < my_image.width && box_top < my_image.height {
+            let box_right_limited = if box_right >= my_image.width {
+                my_image.width - 1
+            } else {
+                box_right
+            };
+            let box_bottom_limited = if box_bottom >= my_image.height {
+                my_image.height - 1
+            } else {
+                box_bottom
+            };
 
-            let mut histogram = vec![vec![0i32; 256]; 3];
+            let mut histogram: Vec2d<i32> = vec![vec![0i32; 256]; 3];
 
-            for y in boxt..boxb_limited {
-                for x in boxl..boxr_limited {
-                    let index = (y * width + x) * 3;
-                    histogram[0][image[index] as usize] += 1;
-                    histogram[1][image[index + 1] as usize] += 1;
-                    histogram[2][image[index + 2] as usize] += 1;
+            for y in box_top..box_bottom_limited {
+                for x in box_left..box_right_limited {
+                    let index = (y * my_image.width + x) * 3;
+                    histogram[0][my_image.final_image[index] as usize] += 1;
+                    histogram[1][my_image.final_image[index + 1] as usize] += 1;
+                    histogram[2][my_image.final_image[index + 2] as usize] += 1;
                 }
             }
 
             let (error, rgb) = color_from_histogram(&histogram);
 
             Some(Rc::new(RefCell::new(QuadNode {
-                image,
-
                 rgb,
                 error,
                 depth,
 
-                boxl,
-                boxt,
-                boxr,
-                boxb,
-                width_block_size: boxr - boxl,
-                height_block_size: boxb - boxt,
+                box_top,
+                box_left,
+                box_right,
+                box_bottom,
+
+                width_block_size: box_right - box_left,
+                height_block_size: box_bottom - box_top,
 
                 children_tl: None,
                 children_tr: None,
@@ -106,199 +149,141 @@ impl QuadNode {
 }
 
 pub fn build_tree(
-    node: &mut Option<Rc<RefCell<QuadNode>>>,
-    list: &mut Vec<Rc<RefCell<QuadNode>>>,
-    width: usize,
-    height: usize,
-    max_depth: u32,
-    threshold_error: f32,
-    min_size: usize,
-    max_size: usize,
+    quad_tree: &QuadTree,
+    quad_node: &mut Option<QuadNodeRef>,
+    quad_node_list: &mut Vec<QuadNodeRef>,
+    my_image: &my_image::MyImage,
 ) {
-    if let Some(node_) = node {
-        let mut node = node_.borrow_mut();
-        if (node.width_block_size > max_size && node.height_block_size > max_size)
-            || ((node.depth <= max_depth)
-                && (node.error >= threshold_error)
-                && (node.width_block_size > min_size && node.height_block_size > min_size))
+    if let Some(quad_node_) = quad_node {
+        let mut quad_node = quad_node_.borrow_mut();
+
+        if (quad_node.width_block_size > quad_tree.max_size
+            && quad_node.height_block_size > quad_tree.max_size)
+            || ((quad_node.depth <= quad_tree.max_depth)
+                && (quad_node.error >= quad_tree.threshold_error)
+                && (quad_node.width_block_size > quad_tree.min_size
+                    && quad_node.height_block_size > quad_tree.min_size))
         {
-            let lr = node.boxl + (node.width_block_size / 2);
-            let tb = node.boxt + (node.height_block_size / 2);
+            let left_right = quad_node.box_left + (quad_node.width_block_size / 2);
+            let top_bottom = quad_node.box_top + (quad_node.height_block_size / 2);
 
-            node.children_tl = QuadNode::new(
-                Rc::clone(&node.image),
-                width,
-                height,
-                node.boxl,
-                node.boxt,
-                lr,
-                tb,
-                node.depth + 1,
+            quad_node.children_tl = QuadNode::new(
+                my_image,
+                quad_node.box_left,
+                quad_node.box_top,
+                left_right,
+                top_bottom,
+                quad_node.depth + 1,
             );
-            node.children_tr = QuadNode::new(
-                Rc::clone(&node.image),
-                width,
-                height,
-                lr,
-                node.boxt,
-                node.boxr,
-                tb,
-                node.depth + 1,
+            quad_node.children_tr = QuadNode::new(
+                my_image,
+                left_right,
+                quad_node.box_top,
+                quad_node.box_right,
+                top_bottom,
+                quad_node.depth + 1,
             );
-            node.children_bl = QuadNode::new(
-                Rc::clone(&node.image),
-                width,
-                height,
-                node.boxl,
-                tb,
-                lr,
-                node.boxb,
-                node.depth + 1,
+            quad_node.children_bl = QuadNode::new(
+                my_image,
+                quad_node.box_left,
+                top_bottom,
+                left_right,
+                quad_node.box_bottom,
+                quad_node.depth + 1,
             );
-            node.children_br = QuadNode::new(
-                Rc::clone(&node.image),
-                width,
-                height,
-                lr,
-                tb,
-                node.boxr,
-                node.boxb,
-                node.depth + 1,
+            quad_node.children_br = QuadNode::new(
+                my_image,
+                left_right,
+                top_bottom,
+                quad_node.box_right,
+                quad_node.box_bottom,
+                quad_node.depth + 1,
             );
 
             build_tree(
-                &mut node.children_tl,
-                list,
-                width,
-                height,
-                max_depth,
-                threshold_error,
-                min_size,
-                max_size,
+                quad_tree,
+                &mut quad_node.children_tl,
+                quad_node_list,
+                my_image,
             );
             build_tree(
-                &mut node.children_tr,
-                list,
-                width,
-                height,
-                max_depth,
-                threshold_error,
-                min_size,
-                max_size,
+                quad_tree,
+                &mut quad_node.children_tr,
+                quad_node_list,
+                my_image,
             );
             build_tree(
-                &mut node.children_bl,
-                list,
-                width,
-                height,
-                max_depth,
-                threshold_error,
-                min_size,
-                max_size,
+                quad_tree,
+                &mut quad_node.children_bl,
+                quad_node_list,
+                my_image,
             );
             build_tree(
-                &mut node.children_br,
-                list,
-                width,
-                height,
-                max_depth,
-                threshold_error,
-                min_size,
-                max_size,
+                quad_tree,
+                &mut quad_node.children_br,
+                quad_node_list,
+                my_image,
             );
         } else {
-            list.push(Rc::clone(node_));
+            quad_node_list.push(Rc::clone(quad_node_));
         }
     }
 }
 
 pub fn render_quad_tree(
+    quad_tree: &QuadTree,
     my_image: &mut my_image::MyImage,
     use_ycbcr: bool,
-    min_size: usize,
-    max_size: usize,
-    max_depth: u32,
-    use_draw_line: bool,
-    threshold_error: f32,
     subsampling_index: usize,
-    use_quad_tree_pow_2: bool,
-) -> Vec<Rc<RefCell<QuadNode>>> {
+) {
     my_image.mwidth = my_image.width;
     my_image.mheight = my_image.height;
 
-    match use_ycbcr {
-        true => {
-            my_image.image_to_ycbcr();
-            my_image.fill_outbound();
-            my_image.subsampling(true, subsampling_index);
-            my_image.ycbcr_to_image();
-        }
-        false => {
-            my_image.image_to_rgb();
-            my_image.fill_outbound();
-            my_image.subsampling(false, subsampling_index);
-            my_image.rgb_to_image();
-        }
+    if use_ycbcr {
+        my_image.image_to_ycbcr();
+        my_image.fill_outbound();
+        my_image.sub_sampling(true, subsampling_index);
+        my_image.ycbcr_to_image();
+    } else {
+        my_image.image_to_rgb();
+        my_image.fill_outbound();
+        my_image.sub_sampling(false, subsampling_index);
+        my_image.rgb_to_image();
     }
 
-    let mut root_quad = match use_quad_tree_pow_2 {
-        true => {
-            let square_size = if my_image.width > my_image.height {
-                my_image.width.next_power_of_two()
-            } else {
-                my_image.height.next_power_of_two()
-            };
-            QuadNode::new(
-                Rc::new(my_image.final_image.to_vec()),
-                my_image.width,
-                my_image.height,
-                0,
-                0,
-                square_size,
-                square_size,
-                0,
-            )
-        }
-        false => QuadNode::new(
-            Rc::new(my_image.final_image.to_vec()),
-            my_image.width,
-            my_image.height,
-            0,
-            0,
-            my_image.width,
-            my_image.height,
-            0,
-        ),
+    let mut quad_root = if quad_tree.use_pow_2 {
+        let square_size = if my_image.width > my_image.height {
+            my_image.width.next_power_of_two()
+        } else {
+            my_image.height.next_power_of_two()
+        };
+        QuadNode::new(my_image, 0, 0, square_size, square_size, 0)
+    } else {
+        QuadNode::new(my_image, 0, 0, my_image.width, my_image.height, 0)
     };
 
-    let mut list_quad: Vec<Rc<RefCell<QuadNode>>> = vec![];
-    build_tree(
-        &mut root_quad,
-        &mut list_quad,
-        my_image.width,
-        my_image.height,
-        max_depth,
-        threshold_error,
-        min_size,
-        max_size,
-    );
+    let mut quad_node_list: Vec<QuadNodeRef> = Vec::new();
+    build_tree(quad_tree, &mut quad_root, &mut quad_node_list, my_image);
 
     my_image.final_image = vec![0u8; my_image.width * my_image.height * 3];
 
-    for quad in &list_quad {
+    for quad in &quad_node_list {
         let quad = quad.borrow();
-        let quad_boxr = if quad.boxr > my_image.width {
+
+        let quad_box_right = if quad.box_right > my_image.width {
             my_image.width
         } else {
-            quad.boxr
+            quad.box_right
         };
-        let quad_boxb = if quad.boxb > my_image.height {
+
+        let quad_box_bottom = if quad.box_bottom > my_image.height {
             my_image.height
         } else {
-            quad.boxb
+            quad.box_bottom
         };
-        for y in quad.boxt..quad_boxb {
-            for x in quad.boxl..quad_boxr {
+
+        for y in quad.box_top..quad_box_bottom {
+            for x in quad.box_left..quad_box_right {
                 let index = (y * my_image.width + x) * 3;
                 my_image.final_image[index] = quad.rgb[0];
                 my_image.final_image[index + 1] = quad.rgb[1];
@@ -307,32 +292,32 @@ pub fn render_quad_tree(
         }
     }
 
-    if use_draw_line {
-        let width = my_image.width;
-        for quad in &list_quad {
+    if quad_tree.use_draw_line {
+        for quad in &quad_node_list {
             let quad = quad.borrow();
-            let quad_boxr = if quad.boxr >= my_image.width {
+
+            let quad_box_right = if quad.box_right >= my_image.width {
                 my_image.width - 1
             } else {
-                quad.boxr
+                quad.box_right
             };
-            let quad_boxb = if quad.boxb >= my_image.height {
+
+            let quad_box_bottom = if quad.box_bottom >= my_image.height {
                 my_image.height - 1
             } else {
-                quad.boxb
+                quad.box_bottom
             };
+
             draw_rect(
                 &mut my_image.final_image,
-                width,
-                quad.boxl,
-                quad.boxt,
-                quad_boxr,
-                quad_boxb,
+                my_image.width,
+                quad.box_left,
+                quad.box_top,
+                quad_box_right,
+                quad_box_bottom,
             );
         }
     }
-
-    list_quad
 }
 
 pub fn draw_rect(image: &mut [u8], width: usize, x1: usize, y1: usize, x2: usize, y2: usize) {

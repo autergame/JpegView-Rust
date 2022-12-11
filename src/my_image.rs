@@ -1,11 +1,12 @@
-use std::os::raw::c_void;
+#![allow(clippy::identity_op)]
 
+use crate::Vec2d;
 use gl::types::{GLfloat, GLint, GLsizei, GLuint};
 
 pub struct MyImage {
     pub final_image: Vec<u8>,
     pub original_image: Vec<u8>,
-    pub image_converted: Vec<Vec<u8>>,
+    pub image_converted: Vec2d<u8>,
 
     pub width: usize,
     pub height: usize,
@@ -16,8 +17,8 @@ pub struct MyImage {
 impl MyImage {
     pub fn new(original: Vec<u8>, width: usize, height: usize) -> MyImage {
         MyImage {
-            final_image: vec![],
-            image_converted: vec![],
+            final_image: Vec::new(),
+            image_converted: Vec::new(),
             original_image: original,
 
             width,
@@ -26,6 +27,7 @@ impl MyImage {
             mheight: height,
         }
     }
+	#[rustfmt::skip]
     pub fn image_to_ycbcr(&mut self) {
         self.image_converted = vec![vec![0u8; self.mheight * self.mwidth]; 3];
         for y in 0..self.height {
@@ -37,15 +39,13 @@ impl MyImage {
                 let g = self.original_image[index_original + 1] as f32;
                 let b = self.original_image[index_original + 2] as f32;
 
-                self.image_converted[0][index_ycbcr] =
-                    min_max_color((0.299f32 * r) + (0.587f32 * g) + (0.114f32 * b));
-                self.image_converted[1][index_ycbcr] =
-                    min_max_color(((-0.168f32 * r) + (-0.331f32 * g) + (0.500f32 * b)) + 128.0f32);
-                self.image_converted[2][index_ycbcr] =
-                    min_max_color(((0.500f32 * r) + (-0.418f32 * g) + (-0.081f32 * b)) + 128.0f32);
+                self.image_converted[0][index_ycbcr] = min_max_color((  0.299f32 * r) + ( 0.587f32 * g) + ( 0.114f32 * b));
+                self.image_converted[1][index_ycbcr] = min_max_color(((-0.168f32 * r) + (-0.331f32 * g) + ( 0.500f32 * b)) + 128.0f32);
+                self.image_converted[2][index_ycbcr] = min_max_color((( 0.500f32 * r) + (-0.418f32 * g) + (-0.081f32 * b)) + 128.0f32);
             }
         }
     }
+	#[rustfmt::skip]
     pub fn ycbcr_to_image(&mut self) {
         self.final_image = vec![0u8; self.height * self.width * 3];
         for y in 0..self.height {
@@ -57,10 +57,9 @@ impl MyImage {
                 let cb = self.image_converted[1][index_ycbcr] as f32 - 128.0f32;
                 let cr = self.image_converted[2][index_ycbcr] as f32 - 128.0f32;
 
-                self.final_image[index_result + 0] = min_max_color(y + (1.402f32 * cr));
-                self.final_image[index_result + 1] =
-                    min_max_color(y + (-0.344f32 * cb) + (-0.714f32 * cr));
-                self.final_image[index_result + 2] = min_max_color(y + (1.772f32 * cb));
+                self.final_image[index_result + 0] = min_max_color(y + ( 1.402f32 * cr));
+                self.final_image[index_result + 1] = min_max_color(y + (-0.344f32 * cb) + (-0.714f32 * cr));
+                self.final_image[index_result + 2] = min_max_color(y + ( 1.772f32 * cb));
             }
         }
     }
@@ -90,8 +89,9 @@ impl MyImage {
             }
         }
     }
-    pub fn subsampling(&mut self, use_ycbcr: bool, subsampling_index: usize) {
-        let start_comp = if use_ycbcr { 0 } else { 0 };
+	#[rustfmt::skip]
+    pub fn sub_sampling(&mut self, use_ycbcr: bool, subsampling_index: usize) {
+        let start_comp = if use_ycbcr { 1 } else { 0 };
         match subsampling_index {
             0 => {} // 4:4:4
             1 =>
@@ -102,14 +102,10 @@ impl MyImage {
                         for x in (0..self.width).step_by(4) {
                             let index = y * self.mwidth + x;
                             let index_two = (y + 1) * self.mwidth + x;
-                            self.image_converted[i][index_two + 0] =
-                                self.image_converted[i][index + 0];
-                            self.image_converted[i][index_two + 1] =
-                                self.image_converted[i][index + 1];
-                            self.image_converted[i][index_two + 2] =
-                                self.image_converted[i][index + 2];
-                            self.image_converted[i][index_two + 3] =
-                                self.image_converted[i][index + 3];
+                            self.image_converted[i][index_two + 0] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 1] = self.image_converted[i][index + 1];
+                            self.image_converted[i][index_two + 2] = self.image_converted[i][index + 2];
+                            self.image_converted[i][index_two + 3] = self.image_converted[i][index + 3];
                         }
                     }
                 }
@@ -125,10 +121,8 @@ impl MyImage {
                             self.image_converted[i][index + 3] = self.image_converted[i][index + 2];
 
                             let index_two = (y + 1) * self.mwidth + x;
-                            self.image_converted[i][index_two + 1] =
-                                self.image_converted[i][index_two + 0];
-                            self.image_converted[i][index_two + 3] =
-                                self.image_converted[i][index_two + 2];
+                            self.image_converted[i][index_two + 1] = self.image_converted[i][index_two + 0];
+                            self.image_converted[i][index_two + 3] = self.image_converted[i][index_two + 2];
                         }
                     }
                 }
@@ -144,14 +138,10 @@ impl MyImage {
                             self.image_converted[i][index + 3] = self.image_converted[i][index + 2];
 
                             let index_two = (y + 1) * self.mwidth + x;
-                            self.image_converted[i][index_two + 0] =
-                                self.image_converted[i][index + 0];
-                            self.image_converted[i][index_two + 1] =
-                                self.image_converted[i][index + 0];
-                            self.image_converted[i][index_two + 2] =
-                                self.image_converted[i][index + 2];
-                            self.image_converted[i][index_two + 3] =
-                                self.image_converted[i][index + 2];
+                            self.image_converted[i][index_two + 0] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 1] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 2] = self.image_converted[i][index + 2];
+                            self.image_converted[i][index_two + 3] = self.image_converted[i][index + 2];
                         }
                     }
                 }
@@ -163,17 +153,14 @@ impl MyImage {
                     for y in (0..self.height).step_by(2) {
                         for x in (0..self.width).step_by(4) {
                             let index = y * self.mwidth + x;
-                            self.image_converted[i][index + 1] = self.image_converted[i][index];
-                            self.image_converted[i][index + 2] = self.image_converted[i][index];
-                            self.image_converted[i][index + 3] = self.image_converted[i][index];
+                            self.image_converted[i][index + 1] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index + 2] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index + 3] = self.image_converted[i][index + 0];
 
                             let index_two = (y + 1) * self.mwidth + x;
-                            self.image_converted[i][index_two + 1] =
-                                self.image_converted[i][index_two];
-                            self.image_converted[i][index_two + 2] =
-                                self.image_converted[i][index_two];
-                            self.image_converted[i][index_two + 3] =
-                                self.image_converted[i][index_two];
+                            self.image_converted[i][index_two + 1] = self.image_converted[i][index_two + 0];
+                            self.image_converted[i][index_two + 2] = self.image_converted[i][index_two + 0];
+                            self.image_converted[i][index_two + 3] = self.image_converted[i][index_two + 0];
                         }
                     }
                 }
@@ -185,15 +172,15 @@ impl MyImage {
                     for y in (0..self.height).step_by(2) {
                         for x in (0..self.width).step_by(4) {
                             let index = y * self.mwidth + x;
-                            self.image_converted[i][index + 1] = self.image_converted[i][index];
-                            self.image_converted[i][index + 2] = self.image_converted[i][index];
-                            self.image_converted[i][index + 3] = self.image_converted[i][index];
+                            self.image_converted[i][index + 1] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index + 2] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index + 3] = self.image_converted[i][index + 0];
 
                             let index_two = (y + 1) * self.mwidth + x;
-                            self.image_converted[i][index_two + 0] = self.image_converted[i][index];
-                            self.image_converted[i][index_two + 1] = self.image_converted[i][index];
-                            self.image_converted[i][index_two + 2] = self.image_converted[i][index];
-                            self.image_converted[i][index_two + 3] = self.image_converted[i][index];
+                            self.image_converted[i][index_two + 0] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 1] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 2] = self.image_converted[i][index + 0];
+                            self.image_converted[i][index_two + 3] = self.image_converted[i][index + 0];
                         }
                     }
                 }
@@ -219,6 +206,12 @@ impl MyImage {
             }
         }
     }
+    pub fn round_up_size(&mut self, block_size: usize) {
+        let y = self.mwidth + (block_size - 1);
+        let z = self.mheight + (block_size - 1);
+        self.mwidth = y - (y % block_size);
+        self.mheight = z - (z % block_size);
+    }
     pub fn create_opengl_image(&self, use_final: bool, use_linear: bool) -> GLuint {
         let color: [GLfloat; 4] = [0.2f32, 0.2f32, 0.2f32, 1.0f32];
         let mut image_texture: GLuint = 0;
@@ -226,15 +219,12 @@ impl MyImage {
             gl::GenTextures(1, &mut image_texture);
             gl::BindTexture(gl::TEXTURE_2D, image_texture);
             gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
-            match use_linear {
-                true => {
-                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
-                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
-                }
-                false => {
-                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
-                    gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
-                }
+            if use_linear {
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
+            } else {
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
             }
             gl::TexParameteri(
                 gl::TEXTURE_2D,
@@ -260,10 +250,11 @@ impl MyImage {
                 0,
                 gl::RGB,
                 gl::UNSIGNED_BYTE,
-                match use_final {
-                    true => self.final_image.as_ptr(),
-                    false => self.original_image.as_ptr(),
-                } as *const c_void,
+                if use_final {
+                    self.final_image.as_ptr()
+                } else {
+                    self.original_image.as_ptr()
+                } as *const std::os::raw::c_void,
             );
         }
         image_texture
@@ -280,10 +271,11 @@ impl MyImage {
                 self.height as i32,
                 gl::RGB,
                 gl::UNSIGNED_BYTE,
-                match use_final {
-                    true => self.final_image.as_ptr(),
-                    false => self.original_image.as_ptr(),
-                } as *const c_void,
+                if use_final {
+                    self.final_image.as_ptr()
+                } else {
+                    self.original_image.as_ptr()
+                } as *const std::os::raw::c_void,
             );
         }
     }
