@@ -8,6 +8,8 @@ pub struct MyImage {
     pub original_image: Vec<u8>,
     pub image_converted: Vec2d<u8>,
 
+    pub file_path: String,
+
     pub width: usize,
     pub height: usize,
     pub mwidth: usize,
@@ -15,11 +17,13 @@ pub struct MyImage {
 }
 
 impl MyImage {
-    pub fn new(original: Vec<u8>, width: usize, height: usize) -> MyImage {
+    pub fn new(original: Vec<u8>, width: usize, height: usize, file_path: String) -> MyImage {
         MyImage {
             final_image: Vec::new(),
             image_converted: Vec::new(),
             original_image: original,
+
+            file_path,
 
             width,
             height,
@@ -91,7 +95,7 @@ impl MyImage {
     }
 	#[rustfmt::skip]
     pub fn sub_sampling(&mut self, use_ycbcr: bool, subsampling_index: usize) {
-        let start_comp = if use_ycbcr { 1 } else { 0 };
+        let start_comp = usize::from(use_ycbcr);
         match subsampling_index {
             0 => {} // 4:4:4
             1 =>
@@ -206,11 +210,24 @@ impl MyImage {
             }
         }
     }
+    pub fn apply_transform(&mut self, use_ycbcr: bool, subsampling_index: usize) {
+        if use_ycbcr {
+            self.image_to_ycbcr();
+            self.fill_outbound();
+            self.sub_sampling(true, subsampling_index);
+            self.ycbcr_to_image();
+        } else {
+            self.image_to_rgb();
+            self.fill_outbound();
+            self.sub_sampling(false, subsampling_index);
+            self.rgb_to_image();
+        }
+    }
     pub fn round_up_size(&mut self, block_size: usize) {
-        let y = self.mwidth + (block_size - 1);
-        let z = self.mheight + (block_size - 1);
-        self.mwidth = y - (y % block_size);
-        self.mheight = z - (z % block_size);
+        let x = self.mwidth + (block_size - 1);
+        let y = self.mheight + (block_size - 1);
+        self.mwidth = x - (x % block_size);
+        self.mheight = y - (y % block_size);
     }
     pub fn create_opengl_image(&self, use_final: bool, use_linear: bool) -> GLuint {
         let color: [GLfloat; 4] = [0.2f32, 0.2f32, 0.2f32, 1.0f32];

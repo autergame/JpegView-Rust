@@ -92,7 +92,7 @@ impl Jpeg {
             use_compression_rate,
         }
     }
-    pub fn render_jpeg(
+    pub fn render(
         &mut self,
         my_image: &mut my_image::MyImage,
         use_ycbcr: bool,
@@ -119,10 +119,14 @@ impl Jpeg {
             generate_q_matrix(&Q_MATRIX_CHROMA_CONST, self.block_size, self.use_gen_qtable);
 
         if !self.use_compression_rate {
-            let factor = if self.quality >= 50.0f32 {
-                200.0f32 - (self.quality * 2.0f32)
+            let factor = if self.use_gen_qtable {
+                if self.quality >= 50.0f32 {
+                    200.0f32 - (self.quality as f32 * 2.0f32)
+                } else {
+                    5000.0f32 / self.quality as f32
+                }
             } else {
-                5000.0f32 / self.quality
+                25.0f32 * ((101.0f32 - self.quality as f32) * 0.01f32)
             };
 
             apply_q_matrix_factor(&mut q_matrix_luma, self.block_size, factor);
@@ -187,7 +191,7 @@ impl Jpeg {
             for _ in 0..(block_width_count * block_height_count) {
                 result_block.push(Arc::new(Mutex::new(vec![
                     vec![
-                        0u8;
+                        0.0f32;
                         self.block_size
                             * self.block_size
                     ];
@@ -267,9 +271,9 @@ impl Jpeg {
                 }
             }
 
-            let mut result_block: Vec3d<u8> =
+            let mut result_block: Vec3d<f32> =
                 vec![
-                    vec![vec![0u8; self.block_size * self.block_size]; 3];
+                    vec![vec![0.0f32; self.block_size * self.block_size]; 3];
                     block_width_count * block_height_count
                 ];
 
@@ -301,8 +305,9 @@ impl Jpeg {
                             let index_result = ((by * self.block_size) + y) * my_image.mwidth
                                 + ((bx * self.block_size) + x);
 
-                            result[i][index_result] =
-                                final_result_block[index_final][i][index_result_block];
+                            result[i][index_result] = my_image::min_max_color(
+                                final_result_block[index_final][i][index_result_block] + 128.0f32,
+                            );
                         }
                     }
                 }
@@ -356,101 +361,83 @@ impl JpegSteps {
         let mut dct_matrix: Vec<f32> = vec![0.0f32; self.block_size * self.block_size];
         if self.use_fast_dct {
             FUNCTIONS_FAST_DCT[self.block_size_index](image_block, &mut dct_matrix);
-        } else if let Some(dct_table) = &self.dct_table {
-            if let Some(alpha_table) = &self.alpha_table {
-                for v in 0..self.block_size {
-                    let vblock = v * self.block_size;
+        } else {
+            let dct_table = self.dct_table.as_ref().unwrap();
+            let alpha_table = self.alpha_table.as_ref().unwrap();
+            for v in 0..self.block_size {
+                let vblock = v * self.block_size;
 
-                    for u in 0..self.block_size {
-                        let ublock = u * self.block_size;
+                for u in 0..self.block_size {
+                    let ublock = u * self.block_size;
 
-                        let mut sum = 0.0f32;
-                        for y in 0..self.block_size {
-                            let yv = dct_table[0][vblock + y];
+                    let mut sum = 0.0f32;
+                    for y in 0..self.block_size {
+                        let yv = dct_table[0][vblock + y];
 
-                            for x in 0..self.block_size {
-                                let xu = dct_table[0][ublock + x];
+                        for x in 0..self.block_size {
+                            let xu = dct_table[0][ublock + x];
 
-                                let index_image = y * self.block_size + x;
-                                sum += image_block[index_image] * xu * yv;
-                            }
+                            let index_image = y * self.block_size + x;
+                            sum += image_block[index_image] * xu * yv;
                         }
-
-                        let index_matrix = vblock + u;
-                        dct_matrix[index_matrix] =
-                            alpha_table[index_matrix] * sum * self.two_block_size;
                     }
+
+                    let index_matrix = vblock + u;
+                    dct_matrix[index_matrix] =
+                        alpha_table[index_matrix] * sum * self.two_block_size;
                 }
             }
         }
         dct_matrix
     }
-    pub fn inverse_dct_function(&self, dct_matrix: &[f32]) -> Vec<u8> {
+    pub fn inverse_dct_function(&self, dct_matrix: &[f32]) -> Vec<f32> {
         let mut image_block: Vec<f32> = vec![0.0f32; self.block_size * self.block_size];
         if self.use_fast_dct {
             FUNCTIONS_FAST_IDCT[self.block_size_index](dct_matrix, &mut image_block);
-        } else if let Some(dct_table) = &self.dct_table {
-            if let Some(alpha_table) = &self.alpha_table {
-                for y in 0..self.block_size {
-                    let yblock = y * self.block_size;
+        } else {
+            let dct_table = self.dct_table.as_ref().unwrap();
+            let alpha_table = self.alpha_table.as_ref().unwrap();
+            for y in 0..self.block_size {
+                let yblock = y * self.block_size;
 
-                    for x in 0..self.block_size {
-                        let xblock = x * self.block_size;
+                for x in 0..self.block_size {
+                    let xblock = x * self.block_size;
 
-                        let mut sum = 0.0f32;
-                        for v in 0..self.block_size {
-                            let vblock = v * self.block_size;
+                    let mut sum = 0.0f32;
+                    for v in 0..self.block_size {
+                        let vblock = v * self.block_size;
 
-                            let yv = dct_table[1][yblock + v];
+                        let yv = dct_table[1][yblock + v];
 
-                            for u in 0..self.block_size {
-                                let xu = dct_table[1][xblock + u];
+                        for u in 0..self.block_size {
+                            let xu = dct_table[1][xblock + u];
 
-                                let index_matrix = vblock + u;
-                                sum +=
-                                    alpha_table[index_matrix] * dct_matrix[index_matrix] * xu * yv;
-                            }
+                            let index_matrix = vblock + u;
+                            sum += alpha_table[index_matrix] * dct_matrix[index_matrix] * xu * yv;
                         }
-
-                        let index_image = y * self.block_size + x;
-                        image_block[index_image] = sum * self.two_block_size;
                     }
+
+                    let index_image = y * self.block_size + x;
+                    image_block[index_image] = sum * self.two_block_size;
                 }
             }
         }
-        let mut result_block: Vec<u8> = vec![0u8; self.block_size * self.block_size];
-        for y in 0..self.block_size {
-            for x in 0..self.block_size {
-                let index = y * self.block_size + x;
-                result_block[index] = my_image::min_max_color(image_block[index] + 128.0f32);
-            }
-        }
-        result_block
+        image_block
     }
-    fn quantize_value(
-        &self,
-        x: f32,
-        index: usize,
-        q_matrix: &[f32],
-        use_compression_rate: bool,
-    ) -> f32 {
-        if use_compression_rate {
-            let mut factor = self.quality_start + (x / self.mwidth as f32) * self.q_control;
+    fn compression_rate_value(&self, x: usize, index: usize, q_matrix: &[f32]) -> f32 {
+        let mut factor = self.quality_start + (x as f32 / self.mwidth as f32) * self.q_control;
 
-            factor = if factor >= 50.0f32 {
-                200.0f32 - factor * 2.0f32
+        factor = if self.use_gen_qtable {
+            if factor >= 50.0f32 {
+                200.0f32 - (factor * 2.0f32)
             } else {
                 5000.0f32 / factor
-            };
-
-            let mut q_value = (q_matrix[index] * factor) / 4.0f32;
-            if q_value <= 0.0f32 {
-                q_value = 1.0f32;
             }
-            q_value
         } else {
-            q_matrix[index]
-        }
+            25.0f32 * ((101.0f32 - factor) * 0.01f32)
+        };
+
+        1.0f32 + (q_matrix[index] - 1.0f32) * factor
     }
     pub fn quantize_function(
         &self,
@@ -462,12 +449,13 @@ impl JpegSteps {
         for y in 0..self.block_size {
             for x in 0..self.block_size {
                 let index = y * self.block_size + x;
-                let q_matrix_value = self.quantize_value(
-                    (start_x + x) as f32,
-                    index,
-                    q_matrix,
-                    use_compression_rate,
-                );
+
+                let q_matrix_value = if use_compression_rate {
+                    self.compression_rate_value(start_x + x, index, q_matrix)
+                } else {
+                    q_matrix[index]
+                };
+
                 dct_matrix[index] = (dct_matrix[index] / q_matrix_value).round();
             }
         }
@@ -482,17 +470,18 @@ impl JpegSteps {
         for y in 0..self.block_size {
             for x in 0..self.block_size {
                 let index = y * self.block_size + x;
-                let q_matrix_value = self.quantize_value(
-                    (start_x + x) as f32,
-                    index,
-                    q_matrix,
-                    use_compression_rate,
-                );
+
+                let q_matrix_value = if use_compression_rate {
+                    self.compression_rate_value(start_x + x, index, q_matrix)
+                } else {
+                    q_matrix[index]
+                };
+
                 dct_matrix[index] *= q_matrix_value;
             }
         }
     }
-    pub fn jpeg_steps(&self, start_x: usize, image_block: &[f32], q_matrix: &[f32]) -> Vec<u8> {
+    pub fn jpeg_steps(&self, start_x: usize, image_block: &[f32], q_matrix: &[f32]) -> Vec<f32> {
         let mut dct_matrix = self.dct_function(image_block);
         self.quantize_function(
             start_x,
@@ -536,11 +525,7 @@ pub fn apply_q_matrix_factor(q_matrix: &mut [f32], block_size: usize, factor: f3
     for y in 0..block_size {
         for x in 0..block_size {
             let index = y * block_size + x;
-            let mut q_value = ((q_matrix[index] * factor) + 50.0f32) / 100.0f32;
-            if q_value <= 0.0f32 {
-                q_value = 1.0f32;
-            }
-            q_matrix[index] = q_value;
+            q_matrix[index] = 1.0f32 + (q_matrix[index] - 1.0f32) * factor;
         }
     }
 }
@@ -562,15 +547,17 @@ pub fn generate_alpha_table(block_size: usize) -> Vec<f32> {
     let mut alpha_table: Vec<f32> = vec![0.0f32; block_size * block_size];
     for y in 0..block_size {
         for x in 0..block_size {
-            alpha_table[y * block_size + x] = if y == 0 {
-                f32::consts::FRAC_1_SQRT_2
-            } else {
-                1.0f32
-            } * if x == 0 {
+            let x_value = if x == 0 {
                 f32::consts::FRAC_1_SQRT_2
             } else {
                 1.0f32
             };
+            let y_value = if y == 0 {
+                f32::consts::FRAC_1_SQRT_2
+            } else {
+                1.0f32
+            };
+            alpha_table[y * block_size + x] = x_value * y_value;
         }
     }
     alpha_table

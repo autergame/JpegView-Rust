@@ -1,6 +1,11 @@
 #![allow(clippy::needless_range_loop)]
 
-use crate::{jpeg, my_image, quad_tree, Vec2d, Vec3d};
+use crate::{
+    jpeg::{self, Jpeg, JpegSteps},
+    my_image::{self, MyImage},
+    quad_tree::{self, QuadNode, QuadNodeRef, QuadTree},
+    Vec2d, Vec3d,
+};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -13,13 +18,13 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 pub fn render_quad_mind(
-    jpeg: &mut jpeg::Jpeg,
-    my_image: &mut my_image::MyImage,
-    quad_tree: &quad_tree::QuadTree,
+    jpeg: &mut Jpeg,
+    my_image: &mut MyImage,
+    quad_tree: &QuadTree,
     use_ycbcr: bool,
     use_threads: bool,
     subsampling_index: usize,
-) -> (Vec<quad_tree::QuadNodeRef>, Vec3d<i32>) {
+) -> (Vec<QuadNodeRef>, Vec3d<i32>) {
     let square_size = if my_image.width > my_image.height {
         my_image.width.next_power_of_two()
     } else {
@@ -28,10 +33,10 @@ pub fn render_quad_mind(
 
     my_image.final_image = my_image.original_image.to_vec();
 
-    let mut quad_root = quad_tree::QuadNode::new(my_image, 0, 0, square_size, square_size, 0);
+    let mut quad_root = QuadNode::new(my_image, 0, 0, square_size, square_size, 0);
 
-    let mut quad_node_list: Vec<quad_tree::QuadNodeRef> = Vec::new();
-    quad_tree::build_tree(quad_tree, &mut quad_root, &mut quad_node_list, my_image);
+    let mut quad_node_list: Vec<QuadNodeRef> = Vec::new();
+    quad_tree.build(&mut quad_root, &mut quad_node_list, my_image);
 
     my_image.mwidth = my_image.width;
     my_image.mheight = my_image.height;
@@ -90,17 +95,21 @@ pub fn render_quad_mind(
     );
 
     if !jpeg.use_compression_rate {
-        let factor = if jpeg.quality >= 50.0f32 {
-            200.0f32 - (jpeg.quality * 2.0f32)
+        let factor = if jpeg.use_gen_qtable {
+            if jpeg.quality >= 50.0f32 {
+                200.0f32 - (jpeg.quality as f32 * 2.0f32)
+            } else {
+                5000.0f32 / jpeg.quality as f32
+            }
         } else {
-            5000.0f32 / jpeg.quality
+            25.0f32 * ((101.0f32 - jpeg.quality as f32) * 0.01f32)
         };
 
         jpeg::apply_q_matrix_factor(&mut q_matrix_luma, quad_tree.max_size, factor);
         jpeg::apply_q_matrix_factor(&mut q_matrix_chroma, quad_tree.max_size, factor);
     }
 
-    let mut jpeg_steps = jpeg::JpegSteps::new(jpeg, my_image.mwidth);
+    let mut jpeg_steps = JpegSteps::new(jpeg, my_image.mwidth);
 
     let (final_result_block, final_dct_zig_zag_block) = if jpeg.use_threads {
         let mut image_block = Vec::with_capacity(quad_node_list.len());
@@ -156,7 +165,7 @@ pub fn render_quad_mind(
 
             result_block.push(Arc::new(Mutex::new(vec![
                 vec![
-                    0u8;
+                    0.0f32;
                     quad.width_block_size
                         * quad.width_block_size
                 ];
@@ -268,7 +277,10 @@ pub fn render_quad_mind(
             image_block.push(solo_image_block);
 
             result_block.push(vec![
-                vec![0u8; quad.width_block_size * quad.width_block_size];
+                vec![
+                    0.0f32;
+                    quad.width_block_size * quad.width_block_size
+                ];
                 3
             ]);
 
@@ -332,7 +344,9 @@ pub fn render_quad_mind(
                     let index_result_block = y * quad.width_block_size + x;
                     let index_result = (quad.box_top + y) * my_image.mwidth + (quad.box_left + x);
 
-                    result[j][index_result] = final_result_block[i][j][index_result_block];
+                    result[j][index_result] = my_image::min_max_color(
+                        final_result_block[i][j][index_result_block] + 128.0f32,
+                    );
                 }
             }
         }
@@ -375,26 +389,23 @@ pub fn render_quad_mind(
 
 fn quad_mind_steps(
     start_x: usize,
-    jpeg_steps: &jpeg::JpegSteps,
+    jpeg_steps: &JpegSteps,
     image_block: &[f32],
     q_matrix: &[f32],
     zig_zag_table: &[usize],
-) -> (Vec<u8>, Vec<i32>) {
+) -> (Vec<f32>, Vec<i32>) {
     let mut dct_matrix = jpeg_steps.dct_function(image_block);
-    let dct_matrix_zig_zag = if jpeg_steps.use_compression_rate {
-        jpeg_steps.quantize_function(start_x, q_matrix, &mut dct_matrix, false);
-        let dct_matrix_zig_zag =
-            zig_zag_function(zig_zag_table, jpeg_steps.block_size, &dct_matrix);
+    jpeg_steps.quantize_function(start_x, q_matrix, &mut dct_matrix, false);
+    let dct_matrix_zig_zag = zig_zag_function(zig_zag_table, jpeg_steps.block_size, &dct_matrix);
+
+    if jpeg_steps.use_compression_rate {
+        dct_matrix = jpeg_steps.dct_function(image_block);
         jpeg_steps.quantize_function(start_x, q_matrix, &mut dct_matrix, true);
         jpeg_steps.de_quantize_function(start_x, q_matrix, &mut dct_matrix, true);
-        dct_matrix_zig_zag
     } else {
-        jpeg_steps.quantize_function(start_x, q_matrix, &mut dct_matrix, false);
-        let dct_matrix_zig_zag =
-            zig_zag_function(zig_zag_table, jpeg_steps.block_size, &dct_matrix);
         jpeg_steps.de_quantize_function(start_x, q_matrix, &mut dct_matrix, false);
-        dct_matrix_zig_zag
     };
+
     (
         jpeg_steps.inverse_dct_function(&dct_matrix),
         dct_matrix_zig_zag,
@@ -402,11 +413,11 @@ fn quad_mind_steps(
 }
 
 fn quad_mind_steps_decompress_load(
-    jpeg_steps: &jpeg::JpegSteps,
+    jpeg_steps: &JpegSteps,
     dct_matrix_zig_zag: &[i32],
     q_matrix: &[f32],
     zig_zag_table: &[usize],
-) -> Vec<u8> {
+) -> Vec<f32> {
     let mut dct_matrix =
         un_zig_zag_function(zig_zag_table, jpeg_steps.block_size, dct_matrix_zig_zag);
     jpeg_steps.de_quantize_function(0, q_matrix, &mut dct_matrix, false);
@@ -492,10 +503,10 @@ impl QuadMindFile {
 
 pub fn save_quad_mind(
     path: &Path,
-    quad_node_list: &[quad_tree::QuadNodeRef],
+    quad_node_list: &[QuadNodeRef],
     quad_dct_zig_zag: &Vec3d<i32>,
-    my_image: &my_image::MyImage,
-    jpeg: &jpeg::Jpeg,
+    my_image: &MyImage,
+    jpeg: &Jpeg,
     use_ycbcr: bool,
     use_threads: bool,
 ) {
@@ -577,7 +588,7 @@ pub fn save_quad_mind(
         .expect("Could not write to file");
 }
 
-pub fn load_quad_mind(path: &Path) -> Result<(my_image::MyImage, jpeg::Jpeg), &str> {
+pub fn load_quad_mind(path: &Path) -> Result<(MyImage, Jpeg), &str> {
     let mut contents: Vec<u8> = Vec::new();
     let mut file = File::open(path).expect("Could not open file");
     file.read_to_end(&mut contents)
@@ -652,21 +663,24 @@ pub fn load_quad_mind(path: &Path) -> Result<(my_image::MyImage, jpeg::Jpeg), &s
     }
 
     Ok(decode_quad_mind(
+        dct_zig_zag,
         quad_mind_file,
         quad_node_jpeg,
-        dct_zig_zag,
+        path.to_str().unwrap().to_string(),
     ))
 }
 
 pub fn decode_quad_mind(
+    dct_zig_zag: Vec3d<i32>,
     quad_mind_file: QuadMindFile,
     quad_node_jpeg: Vec<QuadNodeJpeg>,
-    dct_zig_zag: Vec3d<i32>,
-) -> (my_image::MyImage, jpeg::Jpeg) {
-    let mut my_image = my_image::MyImage::new(
+    file_path: String,
+) -> (MyImage, Jpeg) {
+    let mut my_image = MyImage::new(
         Vec::new(),
         quad_mind_file.width as usize,
         quad_mind_file.height as usize,
+        file_path,
     );
 
     let mut max_size = 0;
@@ -728,16 +742,20 @@ pub fn decode_quad_mind(
         quad_mind_file.use_gen_qtable,
     );
 
-    let factor = if quad_mind_file.quality >= 50.0f32 {
-        200.0f32 - (quad_mind_file.quality * 2.0f32)
+    let factor = if quad_mind_file.use_gen_qtable {
+        if quad_mind_file.quality >= 50.0f32 {
+            200.0f32 - (quad_mind_file.quality as f32 * 2.0f32)
+        } else {
+            5000.0f32 / quad_mind_file.quality as f32
+        }
     } else {
-        5000.0f32 / quad_mind_file.quality
+        25.0f32 * ((101.0f32 - quad_mind_file.quality as f32) * 0.01f32)
     };
 
     jpeg::apply_q_matrix_factor(&mut q_matrix_luma, max_size, factor);
     jpeg::apply_q_matrix_factor(&mut q_matrix_chroma, max_size, factor);
 
-    let jpeg = jpeg::Jpeg::new(
+    let jpeg = Jpeg::new(
         8,
         quad_mind_file.quality,
         1.0f32,
@@ -748,7 +766,7 @@ pub fn decode_quad_mind(
         false,
     );
 
-    let mut jpeg_steps = jpeg::JpegSteps::new(&jpeg, my_image.mwidth);
+    let mut jpeg_steps = JpegSteps::new(&jpeg, my_image.mwidth);
 
     let final_result_block = if jpeg.use_threads {
         let mut result_block = Vec::with_capacity(quad_node_jpeg.len());
@@ -783,7 +801,10 @@ pub fn decode_quad_mind(
             }));
 
             result_block.push(Arc::new(Mutex::new(vec![
-                vec![0u8; block_size * block_size];
+                vec![
+                    0.0f32;
+                    block_size * block_size
+                ];
                 3
             ])));
         }
@@ -848,7 +869,7 @@ pub fn decode_quad_mind(
         for quad in &quad_node_jpeg {
             let block_size = (1 << quad.block_size) as usize;
 
-            result_block.push(vec![vec![0u8; block_size * block_size]; 3]);
+            result_block.push(vec![vec![0.0f32; block_size * block_size]; 3]);
         }
 
         for i in 0..quad_node_jpeg.len() {
@@ -900,7 +921,9 @@ pub fn decode_quad_mind(
                     let index_result = (quad_node_jpeg[i].y as usize + y) * my_image.mwidth
                         + (quad_node_jpeg[i].x as usize + x);
 
-                    result[j][index_result] = final_result_block[i][j][index_result_block];
+                    result[j][index_result] = my_image::min_max_color(
+                        final_result_block[i][j][index_result_block] + 128.0f32,
+                    );
                 }
             }
         }
