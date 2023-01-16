@@ -1,6 +1,9 @@
 #![allow(clippy::needless_range_loop)]
 
-use crate::{my_image, Vec2d, Vec3d};
+use crate::{
+    my_image::{self, MyImage},
+    unwrap_arc_mutex, Vec2d, Vec3d,
+};
 use std::{
     f32,
     sync::{Arc, Mutex},
@@ -94,7 +97,7 @@ impl Jpeg {
     }
     pub fn render(
         &mut self,
-        my_image: &mut my_image::MyImage,
+        my_image: &mut MyImage,
         use_ycbcr: bool,
         use_threads: bool,
         subsampling_index: usize,
@@ -121,12 +124,12 @@ impl Jpeg {
         if !self.use_compression_rate {
             let factor = if self.use_gen_qtable {
                 if self.quality >= 50.0f32 {
-                    200.0f32 - (self.quality as f32 * 2.0f32)
+                    200.0f32 - (self.quality * 2.0f32)
                 } else {
-                    5000.0f32 / self.quality as f32
+                    5000.0f32 / self.quality
                 }
             } else {
-                25.0f32 * ((101.0f32 - self.quality as f32) * 0.01f32)
+                25.0f32 * ((101.0f32 - self.quality) * 0.01f32)
             };
 
             apply_q_matrix_factor(&mut q_matrix_luma, self.block_size, factor);
@@ -143,7 +146,7 @@ impl Jpeg {
     }
     pub fn encode(
         &mut self,
-        my_image: &mut my_image::MyImage,
+        my_image: &mut MyImage,
         q_matrix_luma: Vec<f32>,
         q_matrix_chroma: Vec<f32>,
     ) {
@@ -161,6 +164,7 @@ impl Jpeg {
             let jpeg_steps = Arc::new(jpeg_steps);
 
             let mut image_block = Vec::with_capacity(block_width_count * block_height_count);
+            let mut result_block = Vec::with_capacity(block_width_count * block_height_count);
 
             for by in 0..block_height_count {
                 for bx in 0..block_width_count {
@@ -182,30 +186,24 @@ impl Jpeg {
                         }
                     }
 
-                    image_block.push(solo_image_block);
+                    image_block.push(Arc::new(solo_image_block));
+
+                    result_block.push(Arc::new(Mutex::new(vec![
+                        vec![
+                            0.0f32;
+                            self.block_size
+                                * self.block_size
+                        ];
+                        3
+                    ])));
                 }
             }
-
-            let mut result_block = Vec::with_capacity(block_width_count * block_height_count);
-
-            for _ in 0..(block_width_count * block_height_count) {
-                result_block.push(Arc::new(Mutex::new(vec![
-                    vec![
-                        0.0f32;
-                        self.block_size
-                            * self.block_size
-                    ];
-                    3
-                ])));
-            }
-
-            let image_block = Arc::new(image_block);
 
             let q_matrix_luma = Arc::new(q_matrix_luma);
             let q_matrix_chroma = Arc::new(q_matrix_chroma);
 
             let cpu_threads = thread::available_parallelism().unwrap().get();
-            let pool = threadpool::ThreadPool::with_name("worker".to_string(), cpu_threads);
+            let pool = threadpool::ThreadPool::with_name(String::from("jpegview-worker"), cpu_threads);
 
             for by in 0..block_height_count {
                 for bx in 0..block_width_count {
@@ -213,7 +211,7 @@ impl Jpeg {
                     let index = by * block_width_count + bx;
 
                     let arc_jpeg_steps = Arc::clone(&jpeg_steps);
-                    let arc_image_block = Arc::clone(&image_block);
+                    let arc_image_block = Arc::clone(&image_block[index]);
                     let arc_result_block = Arc::clone(&result_block[index]);
                     let arc_q_matrix_luma = Arc::clone(&q_matrix_luma);
                     let arc_q_matrix_chroma = Arc::clone(&q_matrix_chroma);
@@ -222,17 +220,17 @@ impl Jpeg {
                         let arc_locked_result_block = &mut arc_result_block.lock().unwrap();
                         arc_locked_result_block[0] = arc_jpeg_steps.jpeg_steps(
                             start_x,
-                            &arc_image_block[index][0],
+                            &arc_image_block[0],
                             &arc_q_matrix_luma,
                         );
                         arc_locked_result_block[1] = arc_jpeg_steps.jpeg_steps(
                             start_x,
-                            &arc_image_block[index][1],
+                            &arc_image_block[1],
                             &arc_q_matrix_chroma,
                         );
                         arc_locked_result_block[2] = arc_jpeg_steps.jpeg_steps(
                             start_x,
-                            &arc_image_block[index][2],
+                            &arc_image_block[2],
                             &arc_q_matrix_chroma,
                         );
                     });
@@ -241,8 +239,8 @@ impl Jpeg {
             pool.join();
 
             result_block
-                .iter()
-                .map(|i| i.lock().unwrap().to_vec())
+                .into_iter()
+                .map(unwrap_arc_mutex::<_>)
                 .collect()
         } else {
             let mut image_block: Vec3d<f32> =
@@ -353,7 +351,7 @@ impl JpegSteps {
             use_gen_qtable: jpeg.use_gen_qtable,
             use_compression_rate: jpeg.use_compression_rate,
 
-            q_control: 100.0f32 - jpeg.quality_start as f32,
+            q_control: 100.0f32 - jpeg.quality_start,
             two_block_size: 2.0f32 / jpeg.block_size as f32,
         }
     }

@@ -19,12 +19,9 @@ impl imgui::ClipboardBackend for GlfwClipboardBackend {
         let char_ptr = unsafe { glfw::ffi::glfwGetClipboardString(self.window) };
         if !char_ptr.is_null() {
             let c_str = unsafe { std::ffi::CStr::from_ptr(char_ptr) };
-            Some(
-                c_str
-                    .to_str()
-                    .expect("Could not get clipboard string")
-                    .to_owned(),
-            )
+            Some(String::from(
+                c_str.to_str().expect("Could not get clipboard string"),
+            ))
         } else {
             None
         }
@@ -112,18 +109,18 @@ impl ImguiGLFW {
         window: &glfw::Window,
         imgui: &mut imgui::Context,
     ) {
-        let io = imgui.io_mut();
+        let mut io_mut = imgui.io_mut();
 
-        io.delta_time = delta_time;
+        io_mut.delta_time = delta_time;
 
         let window_size = window.get_size();
-        io.display_size = [window_size.0 as f32, window_size.1 as f32];
+        io_mut.display_size = [window_size.0 as f32, window_size.1 as f32];
 
         if window_size.0 > 0 && window_size.1 > 0 {
             let framebuffer_size = window.get_framebuffer_size();
-            io.display_framebuffer_scale = [
-                framebuffer_size.0 as f32 / io.display_size[0],
-                framebuffer_size.1 as f32 / io.display_size[1],
+            io_mut.display_framebuffer_scale = [
+                framebuffer_size.0 as f32 / io_mut.display_size[0],
+                framebuffer_size.1 as f32 / io_mut.display_size[1],
             ];
         }
     }
@@ -156,10 +153,11 @@ impl ImguiGLFW {
     }
 
     fn set_mod(imgui: &mut imgui::Context, modifier: glfw::Modifiers) {
-        imgui.io_mut().key_ctrl = modifier.intersects(glfw::Modifiers::Control);
-        imgui.io_mut().key_alt = modifier.intersects(glfw::Modifiers::Alt);
-        imgui.io_mut().key_shift = modifier.intersects(glfw::Modifiers::Shift);
-        imgui.io_mut().key_super = modifier.intersects(glfw::Modifiers::Super);
+        let mut io_mut = imgui.io_mut();
+        io_mut.key_ctrl = modifier.intersects(glfw::Modifiers::Control);
+        io_mut.key_alt = modifier.intersects(glfw::Modifiers::Alt);
+        io_mut.key_shift = modifier.intersects(glfw::Modifiers::Shift);
+        io_mut.key_super = modifier.intersects(glfw::Modifiers::Super);
     }
 }
 
@@ -357,8 +355,8 @@ impl Renderer {
 
             gl::Viewport(0, 0, fb_width as _, fb_height as _);
             let matrix = [
-                [2.0 / width as f32, 0.0, 0.0, 0.0],
-                [0.0, 2.0 / -(height as f32), 0.0, 0.0],
+                [2.0 / width, 0.0, 0.0, 0.0],
+                [0.0, 2.0 / -(height), 0.0, 0.0],
                 [0.0, 0.0, -1.0, 0.0],
                 [-1.0, 1.0, 0.0, 1.0],
             ];

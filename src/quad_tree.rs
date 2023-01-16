@@ -1,6 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-use crate::{my_image, Vec2d};
+use crate::{my_image::MyImage, Vec2d};
 use std::{cell::RefCell, rc::Rc};
 
 pub type QuadNodeRef = Rc<RefCell<QuadNode>>;
@@ -26,7 +26,7 @@ pub struct QuadNode {
 
 impl QuadNode {
     pub fn new(
-        my_image: &my_image::MyImage,
+        my_image: &MyImage,
         box_left: usize,
         box_top: usize,
         box_right: usize,
@@ -119,7 +119,7 @@ impl QuadTree {
         &self,
         quad_node: &mut Option<QuadNodeRef>,
         quad_node_list: &mut Vec<QuadNodeRef>,
-        my_image: &my_image::MyImage,
+        my_image: &MyImage,
     ) {
         if let Some(quad_node_) = quad_node {
             let mut quad_node = quad_node_.borrow_mut();
@@ -177,12 +177,7 @@ impl QuadTree {
             self.build(&mut quad_node.children_br, quad_node_list, my_image);
         }
     }
-    pub fn render(
-        &self,
-        my_image: &mut my_image::MyImage,
-        use_ycbcr: bool,
-        subsampling_index: usize,
-    ) {
+    pub fn render(&self, my_image: &mut MyImage, use_ycbcr: bool, subsampling_index: usize) {
         my_image.mwidth = my_image.width;
         my_image.mheight = my_image.height;
 

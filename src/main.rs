@@ -16,6 +16,7 @@ extern crate fast_generated_dct;
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -255,20 +256,21 @@ fn main() {
             .build(|| {
                 ui.menu_bar(|| {
                     if ui.menu_item("Open image") {
-                        let (my_image, jpeg_) =
-                            open_image(&working_dir, use_ycbcr, subsampling_index);
+                        if let Some((my_image, jpeg_)) =
+                            open_image(&working_dir, use_ycbcr, subsampling_index)
+                        {
+                            if let Some(jpeg_) = jpeg_ {
+                                jpeg = jpeg_;
+                            }
 
-                        if let Some(jpeg_) = jpeg_ {
-                            jpeg = jpeg_;
+                            if opt_my_image.is_some() {
+                                image_textures.destroy();
+                            }
+
+                            image_textures.my_image_to_opengl(&my_image);
+
+                            opt_my_image = Some(my_image);
                         }
-
-                        if opt_my_image.is_some() {
-                            image_textures.destroy();
-                        }
-
-                        image_textures.my_image_to_opengl(&my_image);
-
-                        opt_my_image = Some(my_image);
                     }
                     if opt_my_image.is_some() {
                         if let Some(my_image) = &opt_my_image {
@@ -452,7 +454,7 @@ fn open_image(
     working_dir: &PathBuf,
     use_ycbcr: bool,
     subsampling_index: usize,
-) -> (MyImage, Option<Jpeg>) {
+) -> Option<(MyImage, Option<Jpeg>)> {
     let file_dialog_path = FileDialog::new()
         .set_location(working_dir)
         .add_filter("Image Files", &["jpg", "jpeg", "png", "bmp", "qmi"])
@@ -463,45 +465,48 @@ fn open_image(
         .show_open_single_file()
         .expect("Could not open file dialog");
 
-    let path = file_dialog_path.expect("Could not open file dialog path");
-    let ext = path
-        .extension()
-        .expect("Could not get open file dialog path ext")
-        .to_str()
-        .unwrap();
+    if let Some(path) = file_dialog_path {
+        let ext = path
+            .extension()
+            .expect("Could not get open file dialog path ext")
+            .to_str()
+            .unwrap();
 
-    let (my_image, jpeg) = match ext {
-        "jpg" | "jpeg" | "png" | "bmp" => {
-            let image = image::io::Reader::open(&path)
-                .expect("Could not open image")
-                .decode()
-                .expect("Could not decode image");
+        let (my_image, jpeg) = match ext {
+            "jpg" | "jpeg" | "png" | "bmp" => {
+                let image = image::io::Reader::open(&path)
+                    .expect("Could not open image")
+                    .decode()
+                    .expect("Could not decode image");
 
-            let image_width = image.width() as usize;
-            let image_height = image.height() as usize;
+                let image_width = image.width() as usize;
+                let image_height = image.height() as usize;
 
-            let mut my_image = MyImage::new(
-                image.into_rgb8().into_vec(),
-                image_width,
-                image_height,
-                path.to_str().unwrap().to_string(),
-            );
+                let mut my_image = MyImage::new(
+                    image.into_rgb8().into_vec(),
+                    image_width,
+                    image_height,
+                    path.to_str().unwrap().to_string(),
+                );
 
-            my_image.apply_transform(use_ycbcr, subsampling_index);
+                my_image.apply_transform(use_ycbcr, subsampling_index);
 
-            (my_image, None)
-        }
-        "qmi" => {
-            let quad_mind =
-                quad_mind::load_quad_mind(&path).expect("Could not load quad mind image");
-            (quad_mind.0, Some(quad_mind.1))
-        }
-        _ => {
-            unreachable!()
-        }
-    };
+                (my_image, None)
+            }
+            "qmi" => {
+                let quad_mind =
+                    quad_mind::load_quad_mind(&path).expect("Could not load quad mind image");
+                (quad_mind.0, Some(quad_mind.1))
+            }
+            _ => {
+                return None;
+            }
+        };
 
-    (my_image, jpeg)
+        Some((my_image, jpeg))
+    } else {
+        None
+    }
 }
 
 fn save_image(
@@ -522,40 +527,41 @@ fn save_image(
         .show_save_single_file()
         .expect("Could not open save file dialog");
 
-    let path = file_dialog_path.expect("Could not save file dialog path");
-    let ext = path
-        .extension()
-        .expect("Could not get save file dialog path ext")
-        .to_str()
-        .unwrap();
+    if let Some(path) = file_dialog_path {
+        let ext = path
+            .extension()
+            .expect("Could not get save file dialog path ext")
+            .to_str()
+            .unwrap();
 
-    match ext {
-        "png" => {
-            if use_jpeg {
-                image::save_buffer(
-                    path,
-                    &my_image.final_image,
-                    my_image.width as u32,
-                    my_image.height as u32,
-                    image::ColorType::Rgb8,
-                )
-                .expect("Could not save image")
+        match ext {
+            "png" => {
+                if use_jpeg {
+                    image::save_buffer(
+                        path,
+                        &my_image.final_image,
+                        my_image.width as u32,
+                        my_image.height as u32,
+                        image::ColorType::Rgb8,
+                    )
+                    .expect("Could not save image")
+                }
             }
-        }
-        "qmi" => {
-            if use_quad_tree && use_jpeg {
-                quad_mind::save_quad_mind(
-                    &path,
-                    quad_node_list,
-                    quad_dct_zig_zag,
-                    my_image,
-                    jpeg,
-                    use_ycbcr,
-                    use_threads,
-                )
+            "qmi" => {
+                if use_quad_tree && use_jpeg {
+                    quad_mind::save_quad_mind(
+                        &path,
+                        quad_node_list,
+                        quad_dct_zig_zag,
+                        my_image,
+                        jpeg,
+                        use_ycbcr,
+                        use_threads,
+                    )
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -593,3 +599,10 @@ impl OpenglImages {
 
 pub type Vec2d<T> = Vec<Vec<T>>;
 pub type Vec3d<T> = Vec<Vec<Vec<T>>>;
+
+pub fn unwrap_arc_mutex<T>(value: Arc<Mutex<T>>) -> T
+where
+    T: std::fmt::Debug,
+{
+    Arc::try_unwrap(value).unwrap().into_inner().unwrap()
+}

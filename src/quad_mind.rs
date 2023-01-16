@@ -4,7 +4,7 @@ use crate::{
     jpeg::{self, Jpeg, JpegSteps},
     my_image::{self, MyImage},
     quad_tree::{self, QuadNode, QuadNodeRef, QuadTree},
-    Vec2d, Vec3d,
+    unwrap_arc_mutex, Vec2d, Vec3d,
 };
 use std::{
     fs::File,
@@ -97,12 +97,12 @@ pub fn render_quad_mind(
     if !jpeg.use_compression_rate {
         let factor = if jpeg.use_gen_qtable {
             if jpeg.quality >= 50.0f32 {
-                200.0f32 - (jpeg.quality as f32 * 2.0f32)
+                200.0f32 - (jpeg.quality * 2.0f32)
             } else {
-                5000.0f32 / jpeg.quality as f32
+                5000.0f32 / jpeg.quality
             }
         } else {
-            25.0f32 * ((101.0f32 - jpeg.quality as f32) * 0.01f32)
+            25.0f32 * ((101.0f32 - jpeg.quality) * 0.01f32)
         };
 
         jpeg::apply_q_matrix_factor(&mut q_matrix_luma, quad_tree.max_size, factor);
@@ -112,11 +112,6 @@ pub fn render_quad_mind(
     let mut jpeg_steps = JpegSteps::new(jpeg, my_image.mwidth);
 
     let (final_result_block, final_dct_zig_zag_block) = if jpeg.use_threads {
-        let mut image_block = Vec::with_capacity(quad_node_list.len());
-        let mut result_block = Vec::with_capacity(quad_node_list.len());
-        let mut jpeg_steps_list = Vec::with_capacity(quad_node_list.len());
-        let mut dct_zig_zag_block = Vec::with_capacity(quad_node_list.len());
-
         let mut zig_zag_table = Vec::with_capacity(table_size);
 
         for i in 0..table_size {
@@ -124,6 +119,11 @@ pub fn render_quad_mind(
 
             zig_zag_table.push(Arc::new(generate_zig_zag_table(block_size)));
         }
+
+        let mut image_block = Vec::with_capacity(quad_node_list.len());
+        let mut result_block = Vec::with_capacity(quad_node_list.len());
+        let mut jpeg_steps_list = Vec::with_capacity(quad_node_list.len());
+        let mut dct_zig_zag_block = Vec::with_capacity(quad_node_list.len());
 
         for quad in &quad_node_list {
             let quad = quad.borrow();
@@ -161,7 +161,7 @@ pub fn render_quad_mind(
                 }
             }
 
-            image_block.push(solo_image_block);
+            image_block.push(Arc::new(solo_image_block));
 
             result_block.push(Arc::new(Mutex::new(vec![
                 vec![
@@ -182,13 +182,11 @@ pub fn render_quad_mind(
             ])));
         }
 
-        let image_block = Arc::new(image_block);
-
         let q_matrix_luma = Arc::new(q_matrix_luma);
         let q_matrix_chroma = Arc::new(q_matrix_chroma);
 
         let cpu_threads = thread::available_parallelism().unwrap().get();
-        let pool = threadpool::ThreadPool::with_name("worker".to_string(), cpu_threads);
+        let pool = threadpool::ThreadPool::with_name(String::from("jpegview-worker"), cpu_threads);
 
         for i in 0..quad_node_list.len() {
             let quad = quad_node_list[i].borrow();
@@ -197,7 +195,7 @@ pub fn render_quad_mind(
             let table_index = (quad.width_block_size as f32).log2().ceil() as usize - 1;
 
             let arc_jpeg_steps = Arc::clone(&jpeg_steps_list[i]);
-            let arc_image_block = Arc::clone(&image_block);
+            let arc_image_block = Arc::clone(&image_block[i]);
             let arc_result_block = Arc::clone(&result_block[i]);
             let arc_zig_zag_table = Arc::clone(&zig_zag_table[table_index]);
             let arc_q_matrix_luma = Arc::clone(&q_matrix_luma);
@@ -210,21 +208,21 @@ pub fn render_quad_mind(
                 (arc_locked_result_block[0], arc_locked_dct_zig_zag_block[0]) = quad_mind_steps(
                     quad_box_left,
                     &arc_jpeg_steps,
-                    &arc_image_block[i][0],
+                    &arc_image_block[0],
                     &arc_q_matrix_luma,
                     &arc_zig_zag_table,
                 );
                 (arc_locked_result_block[1], arc_locked_dct_zig_zag_block[1]) = quad_mind_steps(
                     quad_box_left,
                     &arc_jpeg_steps,
-                    &arc_image_block[i][1],
+                    &arc_image_block[1],
                     &arc_q_matrix_chroma,
                     &arc_zig_zag_table,
                 );
                 (arc_locked_result_block[2], arc_locked_dct_zig_zag_block[2]) = quad_mind_steps(
                     quad_box_left,
                     &arc_jpeg_steps,
-                    &arc_image_block[i][2],
+                    &arc_image_block[2],
                     &arc_q_matrix_chroma,
                     &arc_zig_zag_table,
                 );
@@ -233,20 +231,13 @@ pub fn render_quad_mind(
         pool.join();
 
         (
-            result_block
-                .iter()
-                .map(|i| i.lock().unwrap().to_vec())
-                .collect(),
+            result_block.into_iter().map(unwrap_arc_mutex).collect(),
             dct_zig_zag_block
-                .iter()
-                .map(|i| i.lock().unwrap().to_vec())
+                .into_iter()
+                .map(unwrap_arc_mutex)
                 .collect(),
         )
     } else {
-        let mut image_block = Vec::with_capacity(quad_node_list.len());
-        let mut result_block = Vec::with_capacity(quad_node_list.len());
-        let mut dct_zig_zag_block = Vec::with_capacity(quad_node_list.len());
-
         let mut zig_zag_table = Vec::with_capacity(table_size);
 
         for i in 0..table_size {
@@ -254,6 +245,10 @@ pub fn render_quad_mind(
 
             zig_zag_table.push(generate_zig_zag_table(block_size));
         }
+
+        let mut image_block = Vec::with_capacity(quad_node_list.len());
+        let mut result_block = Vec::with_capacity(quad_node_list.len());
+        let mut dct_zig_zag_block = Vec::with_capacity(quad_node_list.len());
 
         for quad in &quad_node_list {
             let quad = quad.borrow();
@@ -548,10 +543,10 @@ pub fn save_quad_mind(
         miniz_oxide::deflate::compress_to_vec(&serialized_quad_node_jpeg, 10);
 
     let quad_node_jpeg_data = QuadMindData::new(
-        "SQNJ".to_string(),
+        String::from("SQNJ"),
         sha512_quad_node_jpeg.to_vec(),
         compressed_quad_node_jpeg,
-        "EQNJ".to_string(),
+        String::from("EQNJ"),
     );
 
     let serialized_dct_zig_zag =
@@ -562,14 +557,14 @@ pub fn save_quad_mind(
     let compressed_dct_zig_zag = miniz_oxide::deflate::compress_to_vec(&serialized_dct_zig_zag, 10);
 
     let dct_zig_zag_data = QuadMindData::new(
-        "SDCT".to_string(),
+        String::from("SDCT"),
         sha512_dct_zig_zag.to_vec(),
         compressed_dct_zig_zag,
-        "EDCT".to_string(),
+        String::from("EDCT"),
     );
 
     let quad_mind_file = QuadMindFile::new(
-        "QUADMIND".to_string(),
+        String::from("QUADMIND"),
         my_image.width as u32,
         my_image.height as u32,
         jpeg.quality,
@@ -744,12 +739,12 @@ pub fn decode_quad_mind(
 
     let factor = if quad_mind_file.use_gen_qtable {
         if quad_mind_file.quality >= 50.0f32 {
-            200.0f32 - (quad_mind_file.quality as f32 * 2.0f32)
+            200.0f32 - (quad_mind_file.quality * 2.0f32)
         } else {
-            5000.0f32 / quad_mind_file.quality as f32
+            5000.0f32 / quad_mind_file.quality
         }
     } else {
-        25.0f32 * ((101.0f32 - quad_mind_file.quality as f32) * 0.01f32)
+        25.0f32 * ((101.0f32 - quad_mind_file.quality) * 0.01f32)
     };
 
     jpeg::apply_q_matrix_factor(&mut q_matrix_luma, max_size, factor);
@@ -769,9 +764,6 @@ pub fn decode_quad_mind(
     let mut jpeg_steps = JpegSteps::new(&jpeg, my_image.mwidth);
 
     let final_result_block = if jpeg.use_threads {
-        let mut result_block = Vec::with_capacity(quad_node_jpeg.len());
-        let mut jpeg_steps_list = Vec::with_capacity(quad_node_jpeg.len());
-
         let mut zig_zag_table = Vec::with_capacity(table_size);
 
         for i in 0..table_size {
@@ -779,6 +771,9 @@ pub fn decode_quad_mind(
 
             zig_zag_table.push(Arc::new(generate_zig_zag_table(block_size)));
         }
+
+        let mut result_block = Vec::with_capacity(quad_node_jpeg.len());
+        let mut jpeg_steps_list = Vec::with_capacity(quad_node_jpeg.len());
 
         for quad in &quad_node_jpeg {
             let block_size = (1 << quad.block_size) as usize;
@@ -815,7 +810,7 @@ pub fn decode_quad_mind(
         let q_matrix_chroma = Arc::new(q_matrix_chroma);
 
         let cpu_threads = thread::available_parallelism().unwrap().get();
-        let pool = threadpool::ThreadPool::with_name("worker".to_string(), cpu_threads);
+        let pool = threadpool::ThreadPool::with_name(String::from("jpegview-worker"), cpu_threads);
 
         for i in 0..quad_node_jpeg.len() {
             let table_index = quad_node_jpeg[i].block_size as usize - 1;
@@ -851,13 +846,8 @@ pub fn decode_quad_mind(
         }
         pool.join();
 
-        result_block
-            .iter()
-            .map(|i| i.lock().unwrap().to_vec())
-            .collect()
+        result_block.into_iter().map(unwrap_arc_mutex).collect()
     } else {
-        let mut result_block = Vec::with_capacity(quad_node_jpeg.len());
-
         let mut zig_zag_table = Vec::with_capacity(table_size);
 
         for i in 0..table_size {
@@ -865,6 +855,8 @@ pub fn decode_quad_mind(
 
             zig_zag_table.push(generate_zig_zag_table(block_size));
         }
+
+        let mut result_block = Vec::with_capacity(quad_node_jpeg.len());
 
         for quad in &quad_node_jpeg {
             let block_size = (1 << quad.block_size) as usize;
