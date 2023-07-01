@@ -1,21 +1,21 @@
 [package]
 name = "jpegview-rust"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["autergame"]
 
 [dependencies]
-native-dialog = "0.6.3"
-miniz_oxide = "0.6.2"
+native-dialog = "0.6.4"
+miniz_oxide = "0.7.1"
 threadpool = "1.8.1"
 bincode = "1.3.3"
-serde = { version = "1.0.152", features = ["derive"] }
-image = "0.24.5"
-sha2 = "0.10.6"
+serde = { version = "1.0.164", features = ["derive"] }
+image = "0.24.6"
+sha2 = "0.10.7"
 
 gl = "0.14.0"
-glfw = "0.49.1"
+glfw = "0.52.0"
 
-imgui = { version = "0.9.0", features = ["docking"] }
+imgui = { version = "0.11.0", features = ["docking"] }
 
 fast-generated-dct = { git = "https://github.com/autergame/Fast-DCT-Generator-Rust", version = "0.1.0" }
 
@@ -29,4 +29,4 @@ debug-assertions = false
 
 [profile]
 release = { strip = true }
-release-with-debug = { inherits = "release", debug = true }
+#release = { debug = true, package = { fast-generated-dct = { debug = false } } }

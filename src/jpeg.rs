@@ -203,7 +203,8 @@ impl Jpeg {
             let q_matrix_chroma = Arc::new(q_matrix_chroma);
 
             let cpu_threads = thread::available_parallelism().unwrap().get();
-            let pool = threadpool::ThreadPool::with_name(String::from("jpegview-worker"), cpu_threads);
+            let pool =
+                threadpool::ThreadPool::with_name(String::from("jpegview-worker"), cpu_threads);
 
             for by in 0..block_height_count {
                 for bx in 0..block_width_count {
